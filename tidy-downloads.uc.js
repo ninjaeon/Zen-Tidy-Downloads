@@ -92,7 +92,9 @@
     // extensions.downloads.skip_css_check - Skip CSS availability check (default: false) - USE ONLY FOR DEBUGGING
     // extensions.downloads.max_file_size_for_ai - Maximum file size for AI processing in bytes (default: 52428800 = 50MB)
     // extensions.downloads.mistral_api_url - Mistral API endpoint (default: "https://api.mistral.ai/v1/chat/completions")
-    // extensions.downloads.mistral_model - Mistral model to use (default: "pixtral-large-latest")
+    // extensions.downloads.mistral_model - Mistral model to use (default: "mistral-small-latest")
+    // extensions.downloads.anthropic_model - Anthropic model to use (default: "claude-3-5-haiku-latest")
+    // extensions.downloads.gemini_model - Gemini model to use (default: "gemini-2.5-flash-lite")
     // extensions.downloads.stable_focus_mode - Prevent focus switching during multiple downloads (default: true)
     // extensions.downloads.progress_update_throttle_ms - Throttle delay for in-progress download updates (default: 500)
     // extensions.downloads.show_old_downloads_hours - How many hours back to show old completed downloads on startup (default: 2)
@@ -625,22 +627,48 @@ async function callOpenAIAPI({ prompt, abortSignal }) {
   try {
     const apiKey = getPref('extensions.downloads.openai_api_key', '');
     if (!apiKey) return null;
-    const model = getPref('extensions.downloads.openai_model', 'gpt-4o-mini');
-    const url = getPref('extensions.downloads.openai_api_url', 'https://api.openai.com/v1/chat/completions');
-    const payload = {
+    const model = getPref('extensions.downloads.openai_model', 'gpt-5-nano');
+    const chatUrlPref = getPref('extensions.downloads.openai_api_url', 'https://api.openai.com/v1/chat/completions');
+
+    // Endpoint selection: use Responses API for o3/o4/gpt-4.1/gpt-5 families
+    const useResponses = /^(o3|o4|gpt-4\.1|gpt-5)/.test(model);
+    let url = chatUrlPref;
+    if (useResponses) {
+      url = chatUrlPref.includes('/chat/completions')
+        ? chatUrlPref.replace('/chat/completions', '/responses')
+        : 'https://api.openai.com/v1/responses';
+    }
+
+    // Debug which endpoint is being used
+    debugLog('OpenAI endpoint selection', {
       model,
-      messages: [{ role: 'user', content: prompt }],
-      max_tokens: 100,
-      temperature: 0.2
-    };
+      endpoint: useResponses ? 'responses' : 'chat-completions',
+      url
+    });
+
+    // Build payload per endpoint
+    const payload = useResponses
+      ? {
+          model,
+          input: prompt,
+          max_output_tokens: 100,
+          temperature: 0.2,
+        }
+      : {
+          model,
+          messages: [{ role: 'user', content: prompt }],
+          max_tokens: 100,
+          temperature: 0.2,
+        };
+
     const resp = await fetch(url, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        'Authorization': `Bearer ${apiKey}`
+        'Authorization': `Bearer ${apiKey}`,
       },
       body: JSON.stringify(payload),
-      signal: abortSignal
+      signal: abortSignal,
     });
     if (!resp.ok) {
       if (resp.status === 429) return 'rate-limited';
@@ -648,7 +676,38 @@ async function callOpenAIAPI({ prompt, abortSignal }) {
       return null;
     }
     const data = await resp.json();
-    return data.choices?.[0]?.message?.content?.trim() || null;
+
+    if (!useResponses) {
+      const out = data.choices?.[0]?.message?.content?.trim() || null;
+      debugLog('OpenAI (chat) response preview', out ? out.slice(0, 120) : out);
+      return out;
+    }
+
+    // Parse Responses API output robustly
+    let text = null;
+    if (typeof data.output_text === 'string') {
+      text = data.output_text;
+    } else if (Array.isArray(data.output)) {
+      try {
+        for (const out of data.output) {
+          if (Array.isArray(out.content)) {
+            for (const part of out.content) {
+              if (typeof part.text === 'string') {
+                text = (text ? text + ' ' : '') + part.text;
+              }
+            }
+          }
+        }
+      } catch (e) {
+        debugLog('Failed to parse OpenAI Responses output structure', e);
+      }
+    }
+    // Fallback to chat-style choices if present
+    if (!text && data.choices?.[0]?.message?.content) {
+      text = data.choices[0].message.content;
+    }
+    debugLog('OpenAI (responses) response preview', text ? text.slice(0, 120) : text);
+    return text?.trim() || null;
   } catch (e) {
     console.error('OpenAI API error:', e);
     return null;
@@ -660,7 +719,7 @@ async function callAnthropicAPI({ prompt, abortSignal }) {
   try {
     const apiKey = getPref('extensions.downloads.anthropic_api_key', '');
     if (!apiKey) return null;
-    const model = getPref('extensions.downloads.anthropic_model', 'claude-3-haiku-20240307');
+    const model = getPref('extensions.downloads.anthropic_model', 'claude-3-5-haiku-latest');
     const url = getPref('extensions.downloads.anthropic_api_url', 'https://api.anthropic.com/v1/messages');
     const version = getPref('extensions.downloads.anthropic_version', '2023-06-01');
     const payload = {
@@ -699,7 +758,7 @@ async function callGeminiAPI({ prompt, abortSignal }) {
   try {
     const apiKey = getPref('extensions.downloads.gemini_api_key', '');
     if (!apiKey) return null;
-    const model = getPref('extensions.downloads.gemini_model', 'gemini-2.5-flash-lite-preview-06-17');
+    const model = getPref('extensions.downloads.gemini_model', 'gemini-2.5-flash-lite');
     const base = getPref('extensions.downloads.gemini_api_url', 'https://generativelanguage.googleapis.com/v1beta/models/');
     const url = `${base}${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(apiKey)}`;
     const payload = {
@@ -836,7 +895,7 @@ async function callMistralAPI({ prompt, localPath, fileExtension, abortSignal })
       }
 
       const payload = {
-        model: getPref("extensions.downloads.mistral_model", "pixtral-large-latest"),
+        model: getPref("extensions.downloads.mistral_model", "mistral-small-latest"),
         messages: [{ role: "user", content: content }],
         max_tokens: 100,
         temperature: 0.2,
