@@ -9,6 +9,9 @@
 (function () {
   "use strict";
 
+  // Visible runtime version banner for console verification
+  const ZEN_TIDY_VERSION = '2.0.1';
+
   // Use Components for Firefox compatibility
   const { classes: Cc, interfaces: Ci } = Components;
 
@@ -69,7 +72,7 @@
     }
     
     // If all checks pass, continue with initialization
-    console.log('Zen Tidy Downloads: All popup exclusion checks passed, proceeding with initialization');
+    console.log(`Zen Tidy Downloads ${ZEN_TIDY_VERSION}: All popup exclusion checks passed, proceeding with initialization`);
     
     // === MAIN SCRIPT INITIALIZATION CONTINUES HERE ===
     // The rest of the script now runs within this setTimeout
@@ -575,7 +578,7 @@
 
     // Robust initialization with CSS timing fix
     async function init() {
-      console.log("=== DOWNLOAD PREVIEW SCRIPT STARTING ===");
+      console.log(`=== Zen Tidy Downloads STARTING (version ${ZEN_TIDY_VERSION}) ===`);
       
       // Check if CSS check should be skipped (for debugging)
       const skipCSSCheck = getPref("extensions.downloads.skip_css_check", false);
@@ -587,7 +590,7 @@
         // Wait for CSS to be fully loaded with retries
         cssStylesAvailable = await waitForCSSWithRetries();
         if (!cssStylesAvailable) {
-          console.log("=== DOWNLOAD PREVIEW SCRIPT DISABLED (CSS NOT FOUND) ===");
+          console.log(`=== Zen Tidy Downloads DISABLED (CSS NOT FOUND) - ${ZEN_TIDY_VERSION} ===`);
           console.log("💡 To bypass this check temporarily, set extensions.downloads.skip_css_check = true in about:config");
           return; // Exit early if CSS is not available
         }
