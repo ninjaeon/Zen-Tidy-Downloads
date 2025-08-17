@@ -448,7 +448,18 @@
           console.warn('Expected styling properties were not detected on test elements.');
           console.warn('The script will be disabled to prevent unstyled UI elements.');
           console.warn('Please ensure the CSS file is in the correct location and properly linked.');
-          console.warn('CSS file should be at: C:\\Users\\One\\AppData\\Roaming\\zen\\Profiles\\bxthesda\\chrome\\zen-themes\\zen-tidy-downloads\\chrome.css');
+          try {
+            const dirSvc = Cc["@mozilla.org/file/directory_service;1"].getService(Ci.nsIProperties);
+            const profD = dirSvc.get("ProfD", Ci.nsIFile);
+            const expected = profD.clone();
+            expected.append("chrome");
+            expected.append("zen-themes");
+            expected.append("zen-tidy-downloads");
+            expected.append("chrome.css");
+            console.warn(`CSS file should be at: ${expected.path}`);
+          } catch (e) {
+            console.warn('CSS file should be at: <profile>/chrome/zen-themes/zen-tidy-downloads/chrome.css');
+          }
           debugLog('[CSS Check] CSS detection failed', {
             foundCSSFile: foundTidyDownloadsCSS,
             tooltipPosition: tooltipStyle.position,
