@@ -267,6 +267,17 @@
   },
   {
     "type": "separator",
+    "label": "AI Rename Settings"
+  },
+  {
+    "property": "extensions.downloads.ai_call_timeout_ms",
+    "type": "string",
+    "value": "number",
+    "label": "AI call timeout (ms)",
+    "default": 20000
+  },
+  {
+    "type": "separator",
     "label": "Debugging"
   },
   {

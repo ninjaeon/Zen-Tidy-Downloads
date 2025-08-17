@@ -614,6 +614,254 @@
       return "Untitled";
     }
 
+    // --- Helpers for AI Rename Pipeline ---
+    function getDirectoryPath(fullPath) {
+      try {
+        const idx = fullPath.lastIndexOf(PATH_SEPARATOR);
+        return idx === -1 ? '' : fullPath.substring(0, idx);
+      } catch { return ''; }
+    }
+    
+    function getFileExtension(fullPathOrName) {
+      try {
+        const base = fullPathOrName.split(/[\\\/]/).pop();
+        const dot = base.lastIndexOf('.');
+        return dot > 0 ? base.substring(dot) : '';
+      } catch { return ''; }
+    }
+    
+    function sanitizeFilename(name) {
+      // Remove illegal characters and normalize spacing
+      let out = String(name || '').trim();
+      out = out.replace(/[<>:"\/\\|?*\x00-\x1F]/g, ' ');
+      out = out.replace(/\s+/g, ' ').trim();
+      // Avoid reserved Windows names
+      const reserved = new Set(['CON','PRN','AUX','NUL','COM1','COM2','COM3','COM4','COM5','COM6','COM7','COM8','COM9','LPT1','LPT2','LPT3','LPT4','LPT5','LPT6','LPT7','LPT8','LPT9']);
+      if (reserved.has(out.toUpperCase())) out = out + ' file';
+      // No trailing dots/spaces on Windows
+      out = out.replace(/[ .]+$/g, '');
+      if (!out) out = 'file';
+      return out;
+    }
+    
+    function truncateFilename(baseNoExt, ext) {
+      const maxLen = Math.max(10, Number(getPref('extensions.downloads.max_filename_length', 70)) || 70);
+      const room = Math.max(1, maxLen - (ext ? ext.length : 0));
+      if (baseNoExt.length <= room) return baseNoExt;
+      return baseNoExt.slice(0, Math.max(1, room - 1)) + '…';
+    }
+    
+    function ensureUniqueFilename(dirPath, desiredName) {
+      try {
+        // desiredName includes extension
+        const dot = desiredName.lastIndexOf('.');
+        const base = dot > 0 ? desiredName.substring(0, dot) : desiredName;
+        const ext = dot > 0 ? desiredName.substring(dot) : '';
+        let attempt = 0;
+        while (true) {
+          const candidate = attempt === 0 ? desiredName : `${base} (${attempt})${ext}`;
+          const f = Cc["@mozilla.org/file/local;1"].createInstance(Ci.nsIFile);
+          f.initWithPath(dirPath + PATH_SEPARATOR + candidate);
+          if (!f.exists()) return candidate;
+          attempt++;
+          if (attempt > 9999) return desiredName; // Safety
+        }
+      } catch (e) {
+        debugLog('[AI] ensureUniqueFilename error', e, 'aiRename');
+        return desiredName;
+      }
+    }
+    
+    function shouldAttemptAIRename(download, cardData) {
+      try {
+        if (!getPref('extensions.downloads.enable_ai_renaming', true)) return false;
+        if (!aiRenamingPossible) return false;
+        if (!download || !download.target || !download.target.path) return false;
+        if (download.canceled || download.error) return false;
+        if (!download.succeeded) return false;
+        if (download.aiName) return false; // Already renamed
+        if (renamedFiles.has(download.target.path)) return false; // Prevent loops
+    
+        const ext = getFileExtension(download.target.path).toLowerCase();
+        const blocked = new Set(['.exe','.msi','.bat','.cmd','.sh','.dmg','.appimage']);
+        if (blocked.has(ext)) return false;
+    
+        const sizeLimit = Math.max(0, Number(getPref('extensions.downloads.max_file_size_for_ai', 52428800)) || 52428800);
+        const size = Number(download.totalBytes || download.currentBytes || 0);
+        if (sizeLimit > 0 && size > sizeLimit) return false;
+        return true;
+      } catch { return false; }
+    }
+    
+    function buildAIRenamePrompt(download, ext) {
+      const origName = getSafeFilename(download);
+      const baseName = origName && origName.includes('.') ? origName.substring(0, origName.lastIndexOf('.')) : origName;
+      const ct = download.contentType || '';
+      return (
+        `You are a filename generator. Based on the original name "${baseName}" and file type "${ct}" ` +
+        `produce a short, descriptive filename for saving the file. Do NOT include the extension. ` +
+        `Constraints: 1) 4-70 characters, 2) readable words, 3) avoid dates/hashes unless meaningful, ` +
+        `4) no quotes or punctuation at ends, 5) use spaces or hyphens, 6) no slurs or unsafe content. ` +
+        `Return ONLY the filename text (no extension, no quotes).`
+      );
+    }
+    
+    async function attemptAIRename(downloadKey) {
+      try {
+        const cardData = activeDownloadCards.get(downloadKey);
+        if (!cardData) return;
+        const download = cardData.download;
+        if (!shouldAttemptAIRename(download, cardData)) return;
+    
+        const oldFullPath = download.target.path;
+        const dirPath = getDirectoryPath(oldFullPath);
+        const origName = getSafeFilename(download);
+        const ext = getFileExtension(origName);
+    
+        // Track process for potential cancellation
+        const abortController = new AbortController();
+        activeAIProcesses.set(downloadKey, {
+          abortController,
+          startTime: Date.now(),
+          processState: { phase: 'prompting' }
+        });
+        
+        // Unified cleanup to prevent stuck states
+        let cleanupDone = false;
+        function cleanupAI() {
+          if (cleanupDone) return;
+          cleanupDone = true;
+          try {
+            const proc = activeAIProcesses.get(downloadKey);
+            if (proc) activeAIProcesses.delete(downloadKey);
+            if (cardData?.podElement) {
+              cardData.podElement.classList.remove('renaming-active');
+              cardData.podElement.classList.remove('renaming-initiated');
+            }
+          } catch (_) {}
+        }
+        
+        // Safety timeout to prevent hanging AI calls
+        const timeoutMs = Math.max(3000, Number(getPref('extensions.downloads.ai_call_timeout_ms', 20000)) || 20000);
+        const aiTimeoutId = setTimeout(() => {
+          debugLog('[AI] Aborting AI call due to timeout', { timeoutMs }, 'aiRename');
+          try { abortController.abort(); } catch (_) {}
+        }, timeoutMs);
+    
+        // UI state
+        try {
+          if (cardData.podElement) {
+            cardData.podElement.classList.add('renaming-initiated');
+            cardData.podElement.classList.add('renaming-active');
+          }
+          if (focusedDownloadKey === downloadKey && masterTooltipDOMElement) {
+            const statusEl = masterTooltipDOMElement.querySelector('.card-status');
+            if (statusEl) {
+              statusEl.textContent = 'Renaming with AI…';
+              statusEl.style.color = '';
+            }
+          }
+        } catch (_) {}
+    
+        // Build prompt and optionally include image context
+        const prompt = buildAIRenamePrompt(download, ext);
+        const isImage = ['.png','.jpg','.jpeg','.gif','.webp','.bmp','.tiff','.heic','.heif'].includes(ext.toLowerCase());
+    
+        debugLog('[AI] Calling provider for rename', { downloadKey, ext, isImage }, 'aiRename');
+        let aiResult;
+        try {
+          aiResult = await callAI({
+            prompt,
+            localPath: isImage ? oldFullPath : undefined,
+            fileExtension: isImage ? ext : undefined,
+            abortSignal: abortController.signal
+          });
+        } finally {
+          clearTimeout(aiTimeoutId);
+        }
+    
+        if (aiResult === 'rate-limited') {
+          debugLog('[AI] Provider rate-limited; skipping rename', null, 'aiRename');
+          cleanupAI();
+          return;
+        }
+        if (!aiResult || typeof aiResult !== 'string') {
+          debugLog('[AI] Empty AI result; skipping rename', null, 'aiRename');
+          cleanupAI();
+          return;
+        }
+    
+        // Sanitize and build final name
+        let candidateBase = sanitizeFilename(aiResult);
+        candidateBase = truncateFilename(candidateBase, ext);
+        if (!candidateBase) { cleanupAI(); return; }
+        let finalName = candidateBase + ext;
+        if (finalName.toLowerCase() === origName.toLowerCase()) {
+          debugLog('[AI] Proposed name equals original; skipping move', { finalName }, 'aiRename');
+          cleanupAI();
+          return;
+        }
+        finalName = ensureUniqueFilename(dirPath, finalName);
+    
+        // Perform move on disk
+        try {
+          const file = Cc["@mozilla.org/file/local;1"].createInstance(Ci.nsIFile);
+          file.initWithPath(oldFullPath);
+          if (!file.exists()) {
+            debugLog('[AI] File no longer exists; aborting rename', { oldFullPath }, 'aiRename');
+            return;
+          }
+    
+          // Save originals for undo
+          cardData.trueOriginalSimpleNameBeforeAIRename = origName;
+          cardData.trueOriginalPathBeforeAIRename = oldFullPath;
+    
+          file.moveTo(null, finalName);
+          const newFullPath = dirPath + PATH_SEPARATOR + finalName;
+          debugLog('[AI] File renamed', { from: oldFullPath, to: newFullPath }, 'aiRename');
+    
+          // Update download object and internal keys
+          download.target.path = newFullPath;
+          download.aiName = finalName;
+    
+          // Update activeDownloadCards key and ordering
+          if (activeDownloadCards.has(downloadKey)) {
+            activeDownloadCards.delete(downloadKey);
+            activeDownloadCards.set(newFullPath, cardData);
+            cardData.key = newFullPath;
+            if (cardData.podElement) cardData.podElement.dataset.downloadKey = newFullPath;
+            const idx = orderedPodKeys.indexOf(downloadKey);
+            if (idx > -1) orderedPodKeys.splice(idx, 1, newFullPath);
+            if (focusedDownloadKey === downloadKey) focusedDownloadKey = newFullPath;
+          }
+    
+          // Mark renamed to avoid loops
+          renamedFiles.add(oldFullPath);
+          renamedFiles.add(newFullPath);
+    
+          // Update UI
+          try {
+            if (focusedDownloadKey === newFullPath && masterTooltipDOMElement) {
+              const titleEl = masterTooltipDOMElement.querySelector('.card-title');
+              const statusEl = masterTooltipDOMElement.querySelector('.card-status');
+              const originalEl = masterTooltipDOMElement.querySelector('.card-original-filename');
+              if (titleEl) titleEl.textContent = finalName;
+              if (statusEl) { statusEl.textContent = 'Renamed by AI'; statusEl.style.color = '#2ecc71'; }
+              if (originalEl) { originalEl.style.display = 'block'; originalEl.textContent = cardData.originalFilename || ''; }
+            }
+          } catch (_) {}
+    
+        } finally {
+          // Clear UI state and process tracking
+          cleanupAI();
+        }
+      } catch (err) {
+        debugLog('[AI] attemptAIRename failed', err, 'aiRename');
+        // Best-effort cleanup
+        cleanupAI();
+      }
+    }
+
     // --- Late CSS Activation + Post-CSS Initialization ---
     let cssRetryTimer = null;
     function scheduleLateCSSActivation(maxTries = 30, intervalMs = 1000) {
@@ -787,6 +1035,7 @@
           download,
           podElement: pod,
           originalFilename: getSafeFilename(download),
+          aiRenameTriggered: false,
           isWaitingForZenAnimation: false,
           domAppended: true
         };
@@ -807,6 +1056,17 @@
       if (download.canceled) pod.classList.add('canceled'); else pod.classList.remove('canceled');
       if (download.error) pod.classList.add('error'); else pod.classList.remove('error');
       pod.setAttribute('data-visible', 'true');
+
+      // Trigger AI renaming once on completion
+      try {
+        if (download.succeeded && !cardData.aiRenameTriggered) {
+          cardData.aiRenameTriggered = true;
+          // Fire and forget; internal guards handle eligibility
+          attemptAIRename(key);
+        }
+      } catch (e) {
+        debugLog('[AI] attemptAIRename error', e, 'aiRename');
+      }
 
       // Update tooltip for focused item
       if (bringToFront || !focusedDownloadKey) focusedDownloadKey = key;
@@ -919,7 +1179,7 @@ async function callAI({ prompt, localPath, fileExtension, abortSignal }) {
     case 'deepseek':
       return await callDeepSeekAPI({ prompt, abortSignal });
     case 'ollama':
-      return await callOllamaAPI({ prompt, abortSignal });
+      return await callOllamaAPI({ prompt, localPath, fileExtension, abortSignal });
     default:
       return null;
   }
@@ -1125,15 +1385,38 @@ async function callDeepSeekAPI({ prompt, abortSignal }) {
 }
 
 // Ollama (local)
-async function callOllamaAPI({ prompt, abortSignal }) {
+async function callOllamaAPI({ prompt, localPath, fileExtension, abortSignal }) {
   try {
     const model = getPref('extensions.downloads.ollama_model', 'llama3.1:latest');
     const url = getPref('extensions.downloads.ollama_endpoint', 'http://localhost:11434/api/generate');
-    const payload = {
-      model,
-      prompt,
-      stream: false
-    };
+
+    const payload = { model, prompt, stream: false };
+
+    // If an image is available, attach base64 for vision-capable models
+    if (localPath) {
+      const base64 = fileToBase64(localPath);
+      if (base64) {
+        // Ollama expects raw base64 strings in an `images` array on /api/generate
+        payload.images = [base64];
+        // Optional: light heuristic to warn if model may not be vision-capable
+        try {
+          const lower = String(model || '').toLowerCase();
+          const looksVision = /llava|vision|llama-vision|gpt-4o|vl|clip/.test(lower);
+          if (!looksVision) {
+            debugLog('[AI] Ollama image attached but model may not be vision-capable', { model }, 'aiRename');
+          }
+        } catch (_) {}
+      } else {
+        debugLog('[AI] Ollama image path provided but failed to encode; proceeding without image', { localPath }, 'aiRename');
+      }
+    }
+
+    // Check for abort before request
+    if (abortSignal?.aborted) {
+      throw new DOMException('API request was aborted', 'AbortError');
+    }
+
+    const tNetStart = Date.now();
     const resp = await fetch(url, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -1141,10 +1424,12 @@ async function callOllamaAPI({ prompt, abortSignal }) {
       signal: abortSignal
     });
     if (!resp.ok) {
+      if (resp.status === 429) return 'rate-limited';
       debugLog(`Ollama error ${resp.status}: ${resp.statusText}`);
       return null;
     }
     const data = await resp.json();
+    debugLog('[AI] Ollama fetch+parse duration (ms)', { ms: Date.now() - tNetStart }, 'aiRename');
     return data?.response ? String(data.response).trim() : null;
   } catch (e) {
     console.error('Ollama API error:', e);
@@ -1158,8 +1443,7 @@ async function callMistralAPI({ prompt, localPath, fileExtension, abortSignal })
     // Get API key
     let apiKey = "";
     try {
-      const prefService = Cc["@mozilla.org/preferences-service;1"]
-        .getService(Ci.nsIPrefService);
+      const prefService = Cc["@mozilla.org/preferences-service;1"].getService(Ci.nsIPrefService);
       const branch = prefService.getBranch("extensions.downloads.");
       apiKey = branch.getStringPref("mistral_api_key", "");
     } catch (e) {
@@ -1169,49 +1453,45 @@ async function callMistralAPI({ prompt, localPath, fileExtension, abortSignal })
 
     if (!apiKey) {
       debugLog("No API key found");
-        debugLog("Failed to get API key from preferences", e);
-        return null;
-      }
+      return null;
+    }
 
-      if (!apiKey) {
-        debugLog("No API key found");
-        return null;
-      }
+    // Build message content
+    let content = [{ type: "text", text: prompt }];
 
-      // Build message content
-      let content = [{ type: "text", text: prompt }];
-
-      // Add image data if provided
-      if (localPath) {
-        try {
-          const imageBase64 = fileToBase64(localPath);
-          if (imageBase64) {
-            const mimeType = getMimeTypeFromExtension(fileExtension);
-            content.push({
-              type: "image_url",
-              image_url: { url: `data:${mimeType};base64,${imageBase64}` },
-            });
-          }
-        } catch (e) {
-          debugLog("Failed to encode image, proceeding without it", e);
+    // Add image data if provided
+    if (localPath) {
+      try {
+        const imageBase64 = fileToBase64(localPath);
+        if (imageBase64) {
+          const mimeType = getMimeTypeFromExtension(fileExtension);
+          content.push({
+            type: "image_url",
+            image_url: { url: `data:${mimeType};base64,${imageBase64}` },
+          });
         }
+      } catch (e) {
+        debugLog("Failed to encode image, proceeding without it", e);
       }
+    }
 
-      const payload = {
-        model: getPref("extensions.downloads.mistral_model", "mistral-small-latest"),
-        messages: [{ role: "user", content: content }],
-        max_tokens: 100,
-        temperature: 0.2,
-      };
+    const payload = {
+      model: getPref("extensions.downloads.mistral_model", "mistral-small-latest"),
+      messages: [{ role: "user", content: content }],
+      max_tokens: 100,
+      temperature: 0.2,
+    };
 
-      debugLog("Sending API request to Mistral");
+    debugLog("Sending API request to Mistral");
 
-      // Check for abort signal before making request
-      if (abortSignal?.aborted) {
-        throw new DOMException('API request was aborted', 'AbortError');
-      }
+    // Check for abort signal before making request
+    if (abortSignal?.aborted) {
+      throw new DOMException('API request was aborted', 'AbortError');
+    }
 
-      const response = await fetch(getPref("extensions.downloads.mistral_api_url", "https://api.mistral.ai/v1/chat/completions"), {
+    const response = await fetch(
+      getPref("extensions.downloads.mistral_api_url", "https://api.mistral.ai/v1/chat/completions"),
+      {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
@@ -1219,81 +1499,95 @@ async function callMistralAPI({ prompt, localPath, fileExtension, abortSignal })
         },
         body: JSON.stringify(payload),
         signal: abortSignal // Pass abort signal to fetch
-      });
-
-      if (!response.ok) {
-        if (response.status === 429) return "rate-limited";
-        debugLog(`API error ${response.status}: ${response.statusText}`);
-        return null;
       }
+    );
 
-      const data = await response.json();
-      debugLog("Raw API response:", data);
-
-      return data.choices?.[0]?.message?.content?.trim() || null;
-    } catch (error) {
-      console.error("Mistral API error:", error);
+    if (!response.ok) {
+      if (response.status === 429) return "rate-limited";
+      debugLog(`API error ${response.status}: ${response.statusText}`);
       return null;
     }
+
+    const data = await response.json();
+    debugLog("Raw API response:", data);
+    return data.choices?.[0]?.message?.content?.trim() || null;
+  } catch (error) {
+    console.error("Mistral API error:", error);
+    return null;
   }
+}
 
-  function getMimeTypeFromExtension(ext) {
-    switch (ext?.toLowerCase()) {
-      case ".png": return "image/png";
-      case ".gif": return "image/gif";
-      case ".svg": return "image/svg+xml";
-      case ".webp": return "image/webp";
-      case ".bmp": return "image/bmp";
-      case ".avif": return "image/avif";
-      case ".ico": return "image/x-icon";
-      case ".tif": return "image/tiff";
-      case ".tiff": return "image/tiff";
-      case ".jfif": return "image/jpeg";
-      default: return "image/jpeg";
-    }
+function getMimeTypeFromExtension(ext) {
+  switch (ext?.toLowerCase()) {
+    case ".jpg":
+    case ".jpeg":
+    case ".jfif":
+      return "image/jpeg";
+    case ".png":
+      return "image/png";
+    case ".gif":
+      return "image/gif";
+    case ".svg":
+      return "image/svg+xml";
+    case ".webp":
+      return "image/webp";
+    case ".bmp":
+      return "image/bmp";
+    case ".avif":
+      return "image/avif";
+    case ".ico":
+      return "image/x-icon";
+    case ".tif":
+    case ".tiff":
+      return "image/tiff";
+    default:
+      return "image/jpeg";
   }
+}
 
-  function fileToBase64(path) {
-    try {
-      const file = Cc["@mozilla.org/file/local;1"].createInstance(Ci.nsIFile);
-      file.initWithPath(path);
-      
-      // Check file size
-      if (file.fileSize > getPref("extensions.downloads.max_file_size_for_ai", 52428800)) { // 50MB default
-        debugLog("File too large for base64 conversion");
-        return null;
-      }
+function fileToBase64(localPath) {
+  try {
+    if (!localPath) return null;
 
-      const fstream = Cc["@mozilla.org/network/file-input-stream;1"]
-        .createInstance(Ci.nsIFileInputStream);
-      fstream.init(file, -1, 0, 0);
-      
-      const bstream = Cc["@mozilla.org/binaryinputstream;1"]
-        .createInstance(Ci.nsIBinaryInputStream);
-      bstream.setInputStream(fstream);
-      
-      const bytes = bstream.readBytes(file.fileSize);
-      fstream.close();
-      bstream.close();
+    const file = Cc["@mozilla.org/file/local;1"].createInstance(Ci.nsIFile);
+    file.initWithPath(localPath);
 
-      // Convert to base64 in chunks to avoid memory issues
-      const chunks = [];
-      const CHUNK_SIZE = 0x8000;
-      for (let i = 0; i < bytes.length; i += CHUNK_SIZE) {
-        chunks.push(
-          String.fromCharCode.apply(
-            null,
-            bytes.slice(i, i + CHUNK_SIZE).split("").map(c => c.charCodeAt(0))
-          )
-        );
-      }
-      
-      return btoa(chunks.join(""));
-    } catch (e) {
-      debugLog("fileToBase64 error:", e);
+    if (!file.exists() || !file.isReadable()) {
+      debugLog("fileToBase64: File does not exist or is not readable", { localPath });
       return null;
     }
+
+    const maxSize = getPref("extensions.downloads.max_file_size_for_ai", 52428800);
+    if (file.fileSize > maxSize) {
+      debugLog("File too large for base64 conversion");
+      return null;
+    }
+
+    const tStart = Date.now();
+    const fstream = Cc["@mozilla.org/network/file-input-stream;1"].createInstance(Ci.nsIFileInputStream);
+    fstream.init(file, -1, 0, 0);
+
+    const bstream = Cc["@mozilla.org/binaryinputstream;1"].createInstance(Ci.nsIBinaryInputStream);
+    bstream.setInputStream(fstream);
+
+    const bytes = bstream.readBytes(file.fileSize);
+    fstream.close();
+    bstream.close();
+
+    // Convert to base64 in manageable chunks
+    const CHUNK_SIZE = 0x8000;
+    const chunks = [];
+    for (let i = 0; i < bytes.length; i += CHUNK_SIZE) {
+      chunks.push(bytes.slice(i, i + CHUNK_SIZE));
+    }
+    const encoded = btoa(chunks.join(""));
+    debugLog('[AI] fileToBase64 duration (ms)', { path: localPath, size: file.fileSize, ms: Date.now() - tStart }, 'aiRename');
+    return encoded;
+  } catch (e) {
+    debugLog("fileToBase64 error:", e);
+    return null;
   }
+}
 
 
 
