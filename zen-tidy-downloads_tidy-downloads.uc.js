@@ -1698,6 +1698,15 @@ function fileToBase64(localPath) {
         return;
       }
 
+      // For local Ollama, skip network verification to avoid triggering model pulls
+      // and enable AI renaming optimistically. Actual calls are guarded by per-call
+      // timeouts and centralized cleanup to prevent hangs.
+      if (provider === 'ollama') {
+        debugLog("[AI] Skipping verification for local Ollama; enabling AI renaming optimistically.", { provider }, 'aiRename');
+        aiRenamingPossible = true;
+        return;
+      }
+
       const testPrompt = "Respond with ok";
       let result = null;
       switch (provider) {
@@ -1715,9 +1724,6 @@ function fileToBase64(localPath) {
           break;
         case 'deepseek':
           result = await callDeepSeekAPI({ prompt: testPrompt, abortSignal: undefined });
-          break;
-        case 'ollama':
-          result = await callOllamaAPI({ prompt: testPrompt, abortSignal: undefined });
           break;
       }
 
