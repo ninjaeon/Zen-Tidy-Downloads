@@ -334,11 +334,13 @@
         
         // Try to find our CSS by looking for specific rules
         let foundTidyDownloadsCSS = false;
+        let matchedTidyCSSHref = null;
         for (let sheet of stylesheets) {
           try {
             if (sheet.href && sheet.href.includes('zen-tidy-downloads')) {
               console.log('[CSS Debug] Found zen-tidy-downloads stylesheet:', sheet.href);
               foundTidyDownloadsCSS = true;
+              matchedTidyCSSHref = sheet.href;
               break;
             }
             // Check rules if accessible
@@ -451,14 +453,39 @@
           try {
             const dirSvc = Cc["@mozilla.org/file/directory_service;1"].getService(Ci.nsIProperties);
             const profD = dirSvc.get("ProfD", Ci.nsIFile);
-            const expected = profD.clone();
-            expected.append("chrome");
-            expected.append("zen-themes");
-            expected.append("zen-tidy-downloads");
-            expected.append("chrome.css");
-            console.warn(`CSS file should be at: ${expected.path}`);
+
+            const candidates = [];
+            const zenThemes = profD.clone();
+            zenThemes.append("chrome");
+            zenThemes.append("zen-themes");
+            zenThemes.append("zen-tidy-downloads");
+            zenThemes.append("chrome.css");
+            candidates.push(zenThemes);
+
+            const sineMods = profD.clone();
+            sineMods.append("chrome");
+            sineMods.append("sine-mods");
+            sineMods.append("zen-tidy-downloads");
+            sineMods.append("chrome.css");
+            candidates.push(sineMods);
+
+            // Log actual matched stylesheet href if any
+            if (matchedTidyCSSHref) {
+              console.warn(`Detected stylesheet href containing 'zen-tidy-downloads': ${matchedTidyCSSHref}`);
+            } else {
+              console.warn('No loaded stylesheet href containing "zen-tidy-downloads" was detected.');
+            }
+
+            // Report candidate locations and whether files exist
+            for (const file of candidates) {
+              let exists = false;
+              try { exists = file.exists(); } catch (_) { exists = false; }
+              console.warn(`Candidate CSS path: ${file.path}  (exists: ${exists})`);
+            }
           } catch (e) {
-            console.warn('CSS file should be at: <profile>/chrome/zen-themes/zen-tidy-downloads/chrome.css');
+            console.warn('CSS file should be at one of:');
+            console.warn(' - <profile>/chrome/zen-themes/zen-tidy-downloads/chrome.css');
+            console.warn(' - <profile>/chrome/sine-mods/zen-tidy-downloads/chrome.css');
           }
           debugLog('[CSS Check] CSS detection failed', {
             foundCSSFile: foundTidyDownloadsCSS,
@@ -587,6 +614,261 @@
       return "Untitled";
     }
 
+    // --- Late CSS Activation + Post-CSS Initialization ---
+    let cssRetryTimer = null;
+    function scheduleLateCSSActivation(maxTries = 30, intervalMs = 1000) {
+      let tries = 0;
+      if (cssRetryTimer) {
+        clearInterval(cssRetryTimer);
+        cssRetryTimer = null;
+      }
+      cssRetryTimer = setInterval(async () => {
+        tries++;
+        const ok = checkCSSAvailability();
+        if (ok) {
+          clearInterval(cssRetryTimer);
+          cssRetryTimer = null;
+          console.log('[CSS Check] ✅ CSS detected later. Resuming initialization.');
+          await continueInitializationAfterCSS();
+        } else if (tries >= maxTries) {
+          clearInterval(cssRetryTimer);
+          cssRetryTimer = null;
+          console.log('[CSS Check] Gave up waiting for late CSS. You can set extensions.downloads.skip_css_check = true to debug.');
+        }
+      }, intervalMs);
+      console.log(`[CSS Check] Waiting for late CSS (up to ${maxTries} tries, ${intervalMs}ms interval)...`);
+    }
+
+    async function continueInitializationAfterCSS() {
+      try {
+        cssStylesAvailable = true;
+        debugLog('Continuing initialization after CSS is ready');
+        // Verify AI provider connectivity (sets aiRenamingPossible)
+        await verifyMistralConnection();
+        debugLog('[AI] Verification complete (post-CSS)', { provider: getActiveAIProvider(), aiRenamingPossible }, 'aiRename');
+        // Build UI and wire events
+        ensureUIContainers();
+        await setupDownloadListeners();
+        // Optional UI sync helpers if present later in file
+        try { initSidebarWidthSync && initSidebarWidthSync(); } catch (_) {}
+        console.log('=== Zen Tidy Downloads READY (late CSS) ===');
+      } catch (e) {
+        console.error('Error during post-CSS initialization:', e);
+      }
+    }
+
+    // --- Minimal UI + Downloads wiring ---
+    function ensureUIContainers() {
+      if (downloadCardsContainer && masterTooltipDOMElement && podsRowContainerElement) return;
+      // Root container
+      let container = document.getElementById('userchrome-download-cards-container');
+      if (!container) {
+        container = document.createElement('div');
+        container.id = 'userchrome-download-cards-container';
+        document.documentElement.appendChild(container);
+      }
+      downloadCardsContainer = container;
+
+      // Master tooltip
+      let tooltip = container.querySelector('.details-tooltip.master-tooltip');
+      if (!tooltip) {
+        tooltip = document.createElement('div');
+        tooltip.className = 'details-tooltip master-tooltip';
+        // Basic structure matching chrome.css
+        tooltip.innerHTML = `
+          <div class="card-status"></div>
+          <div class="card-title"></div>
+          <div class="card-original-filename"></div>
+          <div class="card-progress"></div>
+          <div class="card-filesize"></div>
+          <div class="tooltip-buttons-container">
+            <button class="card-undo-button" title="Undo rename">↩</button>
+            <button class="card-close-button" title="Dismiss">×</button>
+          </div>
+          <div class="tooltip-tail"></div>
+        `;
+        container.appendChild(tooltip);
+      }
+      masterTooltipDOMElement = tooltip;
+
+      // Pods row
+      let podsRow = document.getElementById('userchrome-pods-row-container');
+      if (!podsRow) {
+        podsRow = document.createElement('div');
+        podsRow.id = 'userchrome-pods-row-container';
+        container.appendChild(podsRow);
+      }
+      podsRowContainerElement = podsRow;
+    }
+
+    async function setupDownloadListeners() {
+      try {
+        const list = await window.Downloads.getList(window.Downloads.ALL);
+        const view = {
+          onDownloadAdded: (download) => {
+            debugLog('[Downloads] Added', { id: download.id, path: download.target?.path });
+            throttledCreateOrUpdateCard(download, true);
+          },
+          onDownloadChanged: (download) => {
+            throttledCreateOrUpdateCard(download, false);
+          },
+          onDownloadRemoved: (download) => {
+            const key = getDownloadKey(download);
+            debugLog('[Downloads] Removed', { key });
+            // Notify external listeners
+            try {
+              actualDownloadRemovedEventListeners.forEach(cb => {
+                try { cb(key, download); } catch (_) {}
+              });
+            } catch (_) {}
+            // Hide/remove UI for this key
+            const cardData = activeDownloadCards.get(key);
+            if (cardData?.podElement) {
+              cardData.podElement.remove();
+            }
+            activeDownloadCards.delete(key);
+            const idx = orderedPodKeys.indexOf(key);
+            if (idx !== -1) orderedPodKeys.splice(idx, 1);
+            if (focusedDownloadKey === key) {
+              focusedDownloadKey = orderedPodKeys[orderedPodKeys.length - 1] || null;
+              if (focusedDownloadKey) updateUIForFocusedDownload(focusedDownloadKey, false);
+            }
+          }
+        };
+        await list.addView(view);
+
+        // Populate existing recent downloads
+        const hours = Math.max(0, Number(getPref('extensions.downloads.show_old_downloads_hours', 2)) || 0);
+        const cutoff = Date.now() - hours * 3600 * 1000;
+        const all = await list.getAll();
+        for (const dl of all) {
+          // Skip very old ones
+          const st = dl.startTime ? new Date(dl.startTime).getTime() : Date.now();
+          if (st >= cutoff) throttledCreateOrUpdateCard(dl, false);
+        }
+        debugLog('[Downloads] Listeners registered and initial population complete');
+      } catch (e) {
+        console.error('Failed to set up Downloads listeners:', e);
+      }
+    }
+
+    function throttledCreateOrUpdateCard(download, bringToFront) {
+      try {
+        const key = getDownloadKey(download);
+        const last = cardUpdateThrottle.get(key) || 0;
+        const throttleMs = Math.max(0, Number(getPref('extensions.downloads.progress_update_throttle_ms', 500)) || 0);
+        const now = Date.now();
+        if (now - last < throttleMs && !bringToFront) return;
+        cardUpdateThrottle.set(key, now);
+        createOrUpdateCard(download, bringToFront);
+      } catch (e) {
+        console.error('throttledCreateOrUpdateCard error:', e);
+      }
+    }
+
+    function createOrUpdateCard(download, bringToFront) {
+      ensureUIContainers();
+      const key = getDownloadKey(download);
+      if (dismissedDownloads.has(key)) return; // Respect dismissed state
+
+      let cardData = activeDownloadCards.get(key);
+      if (!cardData) {
+        // New card
+        const pod = document.createElement('div');
+        pod.className = 'download-pod';
+        pod.dataset.downloadKey = key;
+        pod.addEventListener('click', () => {
+          focusedDownloadKey = key;
+          updateUIForFocusedDownload(key, true);
+        });
+        podsRowContainerElement.appendChild(pod);
+        cardData = {
+          key,
+          download,
+          podElement: pod,
+          originalFilename: getSafeFilename(download),
+          isWaitingForZenAnimation: false,
+          domAppended: true
+        };
+        activeDownloadCards.set(key, cardData);
+        orderedPodKeys.push(key);
+      } else {
+        // Update existing
+        cardData.download = download;
+      }
+
+      // Lightweight visual state updates
+      const pod = cardData.podElement;
+      if (download.succeeded) {
+        pod.classList.add('completed');
+      } else {
+        pod.classList.remove('completed');
+      }
+      if (download.canceled) pod.classList.add('canceled'); else pod.classList.remove('canceled');
+      if (download.error) pod.classList.add('error'); else pod.classList.remove('error');
+      pod.setAttribute('data-visible', 'true');
+
+      // Update tooltip for focused item
+      if (bringToFront || !focusedDownloadKey) focusedDownloadKey = key;
+      updateUIForFocusedDownload(focusedDownloadKey, false);
+    }
+
+    function updateUIForFocusedDownload(key, animate) {
+      if (!key) return;
+      ensureUIContainers();
+      const cardData = activeDownloadCards.get(key);
+      if (!cardData) return;
+
+      // Focus styling
+      for (const [k, v] of activeDownloadCards.entries()) {
+        if (v.podElement) v.podElement.classList.toggle('focused-pod', k === key);
+      }
+
+      // Tooltip content
+      const dl = cardData.download;
+      const titleEl = masterTooltipDOMElement.querySelector('.card-title');
+      const statusEl = masterTooltipDOMElement.querySelector('.card-status');
+      const originalEl = masterTooltipDOMElement.querySelector('.card-original-filename');
+      const progressEl = masterTooltipDOMElement.querySelector('.card-progress');
+      const sizeEl = masterTooltipDOMElement.querySelector('.card-filesize');
+      if (titleEl) titleEl.textContent = dl.aiName || cardData.originalFilename || getSafeFilename(dl);
+      if (originalEl) {
+        const hasAI = !!dl.aiName && dl.aiName !== cardData.originalFilename;
+        originalEl.style.display = hasAI ? 'block' : 'none';
+        if (hasAI) originalEl.textContent = cardData.originalFilename || '';
+      }
+      if (statusEl) {
+        let status = 'Downloading';
+        if (dl.succeeded) status = 'Download completed';
+        else if (dl.error) status = `Error: ${dl.error?.message || 'Download failed'}`;
+        else if (dl.canceled) status = 'Download canceled';
+        statusEl.textContent = status;
+      }
+      if (progressEl) progressEl.textContent = formatProgress(dl);
+      if (sizeEl) sizeEl.textContent = formatFileSize(dl.totalBytes || dl.currentBytes || 0);
+
+      masterTooltipDOMElement.setAttribute('data-visible', 'true');
+    }
+
+    function formatFileSize(bytes) {
+      const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+      let i = 0;
+      let n = Math.max(0, Number(bytes) || 0);
+      while (n >= 1024 && i < units.length - 1) { n /= 1024; i++; }
+      return `${n.toFixed(i === 0 ? 0 : 1)} ${units[i]}`;
+    }
+
+    function formatProgress(dl) {
+      try {
+        if (dl.succeeded) return '100%';
+        const cur = Number(dl.currentBytes || 0);
+        const tot = Number(dl.totalBytes || 0);
+        if (tot > 0) return `${Math.min(100, Math.round((cur / tot) * 100))}%`;
+        if (cur > 0) return `${formatFileSize(cur)} downloaded`;
+        return '';
+      } catch { return ''; }
+    }
+
     // Robust initialization with CSS timing fix
     async function init() {
       console.log(`=== Zen Tidy Downloads STARTING (version ${ZEN_TIDY_VERSION}) ===`);
@@ -603,7 +885,9 @@
         if (!cssStylesAvailable) {
           console.log(`=== Zen Tidy Downloads DISABLED (CSS NOT FOUND) - ${ZEN_TIDY_VERSION} ===`);
           console.log("💡 To bypass this check temporarily, set extensions.downloads.skip_css_check = true in about:config");
-          return; // Exit early if CSS is not available
+          // Do not hard-stop. Keep a light watcher to resume when CSS arrives.
+          scheduleLateCSSActivation();
+          return; // Exit heavy init for now
         }
       }
       
@@ -611,6 +895,11 @@
       // Verify AI provider connectivity (sets aiRenamingPossible)
       await verifyMistralConnection();
       debugLog('[AI] Verification complete', { provider: getActiveAIProvider(), aiRenamingPossible }, 'aiRename');
+      // Build UI and wire listeners now that CSS is present
+      ensureUIContainers();
+      await setupDownloadListeners();
+      try { initSidebarWidthSync && initSidebarWidthSync(); } catch (_) {}
+      console.log('=== Zen Tidy Downloads READY ===');
     }
     init();
 

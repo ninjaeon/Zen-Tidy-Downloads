@@ -2,14 +2,14 @@
   "id": "zen-tidy-downloads",
   "name": "Tidy Downloads",
   "description": "Clean up your downloads with AI",
-  "homepage": "https://github.com/Anoms12/Zen-Tidy-Downloads",
-  "readme": "https://raw.githubusercontent.com/Anoms12/Zen-Tidy-Downloads/refs/heads/main/README.md",
-  "image": "https://github.com/Anoms12/Zen-Tidy-Downloads/blob/main/image.png?raw=true",
-  "style": "https://raw.githubusercontent.com/Anoms12/Zen-Tidy-Downloads/main/chrome.css",
+  "homepage": "https://github.com/ninjaeon/Zen-Tidy-Downloads/tree/all-api",
+  "readme": "https://raw.githubusercontent.com/ninjaeon/Zen-Tidy-Downloads/all-api/README.md",
+  "image": "https://raw.githubusercontent.com/ninjaeon/Zen-Tidy-Downloads/all-api/image.png",
+  "style": "https://raw.githubusercontent.com/ninjaeon/Zen-Tidy-Downloads/all-api/chrome.css",
   "js": true,
   "preferences": "https://raw.githubusercontent.com/ninjaeon/Zen-Tidy-Downloads/all-api/preferences.json",
   "author": "Anoms12",
-  "version": "2.0.0",
+  "version": "2.0.1",
   "tags": [
     "sine",
     "fx-autoconfig",
@@ -17,6 +17,6 @@
     "Tidy Pack"
   ],
   "createdAt": "2025-05-24",
-  "updatedAt": "2025-07-15",
+  "updatedAt": "2025-08-17",
   "fork": ["zen"]
 }
