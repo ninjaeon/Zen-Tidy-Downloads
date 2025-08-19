@@ -130,6 +130,7 @@
     let orderedPodKeys = []; // Newest will be at the end
     let lastRotationDirection = null; // Track rotation direction: 'forward', 'backward', or null
     const dismissedDownloads = new Set(); // Track downloads that have been manually dismissed or auto-hidden
+    const imagePreviewRetryState = new Map(); // key -> retryCount
     
     // AI Process Management
     const activeAIProcesses = new Map(); // downloadKey -> { abortController, processState, startTime }
@@ -834,6 +835,17 @@
             if (idx > -1) orderedPodKeys.splice(idx, 1, newFullPath);
             if (focusedDownloadKey === downloadKey) focusedDownloadKey = newFullPath;
           }
+
+          // Migrate any pending image preview retries to the new key and refresh the card
+          try {
+            if (imagePreviewRetryState.has(downloadKey)) {
+              const prevAttempts = imagePreviewRetryState.get(downloadKey);
+              imagePreviewRetryState.delete(downloadKey);
+              imagePreviewRetryState.set(newFullPath, prevAttempts);
+            }
+            // Force an immediate update to set preview src with the new path
+            createOrUpdateCard(download, false);
+          } catch (_) {}
     
           // Mark renamed to avoid loops
           renamedFiles.add(oldFullPath);
@@ -849,6 +861,8 @@
               if (statusEl) { statusEl.textContent = 'Renamed by AI'; statusEl.style.color = '#2ecc71'; }
               if (originalEl) { originalEl.style.display = 'block'; originalEl.textContent = cardData.originalFilename || ''; }
             }
+            // Ensure undo visibility is recalculated immediately
+            try { updateUIForFocusedDownload(focusedDownloadKey || newFullPath, true); } catch (_) {}
           } catch (_) {}
     
         } finally {
@@ -922,22 +936,85 @@
       if (!tooltip) {
         tooltip = document.createElement('div');
         tooltip.className = 'details-tooltip master-tooltip';
-        // Basic structure matching chrome.css
-        tooltip.innerHTML = `
-          <div class="card-status"></div>
-          <div class="card-title"></div>
-          <div class="card-original-filename"></div>
-          <div class="card-progress"></div>
-          <div class="card-filesize"></div>
-          <div class="tooltip-buttons-container">
-            <button class="card-undo-button" title="Undo rename">↩</button>
-            <button class="card-close-button" title="Dismiss">×</button>
-          </div>
-          <div class="tooltip-tail"></div>
-        `;
+        // Build structure with createElement to avoid sanitizers removing <button>
+        const statusEl = document.createElement('div');
+        statusEl.className = 'card-status';
+        const titleEl = document.createElement('div');
+        titleEl.className = 'card-title';
+        const origEl = document.createElement('div');
+        origEl.className = 'card-original-filename';
+        const progressEl = document.createElement('div');
+        progressEl.className = 'card-progress';
+        const sizeEl = document.createElement('div');
+        sizeEl.className = 'card-filesize';
+
+        const btns = document.createElement('div');
+        btns.className = 'tooltip-buttons-container';
+        const undoBtn = document.createElement('button');
+        undoBtn.className = 'card-undo-button';
+        undoBtn.title = 'Undo rename';
+        undoBtn.textContent = '↩';
+        const closeBtn = document.createElement('button');
+        closeBtn.className = 'card-close-button';
+        closeBtn.title = 'Dismiss';
+        closeBtn.textContent = '×';
+        btns.appendChild(undoBtn);
+        btns.appendChild(closeBtn);
+
+        const tail = document.createElement('div');
+        tail.className = 'tooltip-tail';
+
+        tooltip.appendChild(statusEl);
+        tooltip.appendChild(titleEl);
+        tooltip.appendChild(origEl);
+        tooltip.appendChild(progressEl);
+        tooltip.appendChild(sizeEl);
+        tooltip.appendChild(btns);
+        tooltip.appendChild(tail);
+
         container.appendChild(tooltip);
       }
       masterTooltipDOMElement = tooltip;
+      
+      // Wire tooltip buttons once
+      if (masterTooltipDOMElement && !masterTooltipDOMElement.dataset.wired) {
+        const undoBtn = masterTooltipDOMElement.querySelector('.card-undo-button');
+        const closeBtn = masterTooltipDOMElement.querySelector('.card-close-button');
+        if (undoBtn) {
+          undoBtn.addEventListener('click', (e) => {
+            try {
+              e.stopPropagation();
+              if (focusedDownloadKey) {
+                undoRename(focusedDownloadKey);
+              }
+            } catch (_) {}
+          });
+        }
+        if (closeBtn) {
+          closeBtn.addEventListener('click', (e) => {
+            try {
+              e.stopPropagation();
+              // Dismiss the currently focused download (same behavior as context menu)
+              const key = focusedDownloadKey;
+              if (!key) {
+                masterTooltipDOMElement.setAttribute('data-visible', 'false');
+                return;
+              }
+              dismissedDownloads.add(key);
+              const cd = activeDownloadCards.get(key);
+              if (cd?.podElement) cd.podElement.remove();
+              activeDownloadCards.delete(key);
+              const idx = orderedPodKeys.indexOf(key);
+              if (idx !== -1) orderedPodKeys.splice(idx, 1);
+              if (focusedDownloadKey === key) {
+                focusedDownloadKey = null;
+              }
+              masterTooltipDOMElement.setAttribute('data-visible', 'false');
+            } catch (_) {}
+          });
+        }
+        masterTooltipDOMElement.dataset.wired = 'true';
+      }
 
       // Pods row
       let podsRow = document.getElementById('userchrome-pods-row-container');
@@ -1006,7 +1083,10 @@
         const last = cardUpdateThrottle.get(key) || 0;
         const throttleMs = Math.max(0, Number(getPref('extensions.downloads.progress_update_throttle_ms', 500)) || 0);
         const now = Date.now();
-        if (now - last < throttleMs && !bringToFront) return;
+        // Always process completion events immediately so AI rename can trigger,
+        // even if they occur within the throttle window
+        const isCompletion = !!(download && download.succeeded);
+        if ((now - last < throttleMs) && !bringToFront && !isCompletion) return;
         cardUpdateThrottle.set(key, now);
         createOrUpdateCard(download, bringToFront);
       } catch (e) {
@@ -1025,9 +1105,58 @@
         const pod = document.createElement('div');
         pod.className = 'download-pod';
         pod.dataset.downloadKey = key;
-        pod.addEventListener('click', () => {
-          focusedDownloadKey = key;
-          updateUIForFocusedDownload(key, true);
+        // Preview container (image or icon)
+        const preview = document.createElement('div');
+        preview.className = 'card-preview-container';
+        const img = document.createElement('img');
+        try {
+          img.alt = '';
+          img.decoding = 'async';
+          img.loading = 'lazy';
+          // If the image fails to load (e.g., renamed between set and fetch), clear flag and retry
+          img.addEventListener('error', () => {
+            try {
+              img.style.opacity = '';
+              img.removeAttribute('src');
+              delete img.dataset.srcSet;
+              const k = pod.dataset.downloadKey;
+              if (k) scheduleImagePreviewRetry(k);
+            } catch (_) {}
+          }, { once: false });
+          img.addEventListener('load', () => {
+            try {
+              img.style.opacity = '1';
+              img.dataset.srcSet = '1';
+              const k = pod.dataset.downloadKey;
+              if (k) imagePreviewRetryState.delete(k);
+            } catch (_) {}
+          }, { once: false });
+        } catch (_) {}
+        preview.appendChild(img);
+        pod.appendChild(preview);
+        // Left-click toggles the tooltip for this item
+        pod.addEventListener('click', (e) => {
+          try {
+            e.stopPropagation();
+            const currentKey = e.currentTarget?.dataset?.downloadKey || key;
+            const visible = masterTooltipDOMElement?.getAttribute('data-visible') === 'true';
+            if (focusedDownloadKey === currentKey && visible) {
+              masterTooltipDOMElement.setAttribute('data-visible', 'false');
+            } else {
+              focusedDownloadKey = currentKey;
+              updateUIForFocusedDownload(currentKey, true);
+            }
+          } catch (_) {}
+        });
+        // Right-click opens context menu
+        pod.addEventListener('contextmenu', (e) => {
+          try {
+            e.preventDefault();
+            e.stopPropagation();
+            const currentKey = e.currentTarget?.dataset?.downloadKey || key;
+            focusedDownloadKey = currentKey;
+            showContextMenuForPod(currentKey, e.clientX, e.clientY);
+          } catch (_) {}
         });
         podsRowContainerElement.appendChild(pod);
         cardData = {
@@ -1056,6 +1185,48 @@
       if (download.canceled) pod.classList.add('canceled'); else pod.classList.remove('canceled');
       if (download.error) pod.classList.add('error'); else pod.classList.remove('error');
       pod.setAttribute('data-visible', 'true');
+
+      // Try to set preview image for image downloads; fallback to system icon for non-images
+      try {
+        const path = download?.target?.path || '';
+        const isImage = /\.(png|jpe?g|webp|gif|bmp|ico|tif?f|avif|svg)$/i.test(path);
+        const imgEl = pod.querySelector('.card-preview-container img');
+        if (imgEl && !imgEl.dataset.srcSet) {
+          const file = Cc["@mozilla.org/file/local;1"].createInstance(Ci.nsIFile);
+          const ios = Cc["@mozilla.org/network/io-service;1"].getService(Ci.nsIIOService);
+          try { file.initWithPath(path); } catch (_) {}
+          if (isImage && path) {
+            // Only set the actual image once the file exists and is readable,
+            // otherwise wait for a later update to retry (avoid locking in a broken img)
+            try {
+              if (file && file.exists() && file.isReadable()) {
+                const fileSpec = ios.newFileURI(file).spec; // file:///...
+                imgEl.src = fileSpec;
+                imgEl.style.opacity = '1';
+                imgEl.dataset.srcSet = '1';
+              } else {
+                // Schedule a retry to load the image soon
+                scheduleImagePreviewRetry(key);
+              }
+            } catch (_) {}
+          } else if (path) {
+            // Non-image: show system icon immediately
+            try {
+              try {
+                const fileSpec = ios.newFileURI(file).spec; // may throw if invalid
+                imgEl.src = `moz-icon://${fileSpec}?size=64`;
+              } catch (e1) {
+                // Extension-based fallback: moz-icon://.ext
+                const match = path.match(/\.([a-z0-9]+)$/i);
+                const ext = match ? match[1].toLowerCase() : '';
+                imgEl.src = ext ? `moz-icon://.${ext}?size=64` : `moz-icon://.bin?size=64`;
+              }
+              imgEl.style.opacity = '1';
+              imgEl.dataset.srcSet = '1';
+            } catch (_) {}
+          }
+        }
+      } catch (_) {}
 
       // Trigger AI renaming once on completion
       try {
@@ -1091,6 +1262,7 @@
       const originalEl = masterTooltipDOMElement.querySelector('.card-original-filename');
       const progressEl = masterTooltipDOMElement.querySelector('.card-progress');
       const sizeEl = masterTooltipDOMElement.querySelector('.card-filesize');
+      const undoEl = masterTooltipDOMElement.querySelector('.card-undo-button');
       if (titleEl) titleEl.textContent = dl.aiName || cardData.originalFilename || getSafeFilename(dl);
       if (originalEl) {
         const hasAI = !!dl.aiName && dl.aiName !== cardData.originalFilename;
@@ -1105,9 +1277,173 @@
         statusEl.textContent = status;
       }
       if (progressEl) progressEl.textContent = formatProgress(dl);
-      if (sizeEl) sizeEl.textContent = formatFileSize(dl.totalBytes || dl.currentBytes || 0);
+      const bytes = dl.totalBytes || dl.currentBytes || 0;
+      if (sizeEl) {
+        sizeEl.textContent = formatFileSize(bytes);
+        sizeEl.style.display = bytes > 0 ? 'block' : 'none';
+      }
+      if (undoEl) {
+        const haveStoredSimple = !!cardData.trueOriginalSimpleNameBeforeAIRename;
+        const haveStoredPath = !!cardData.trueOriginalPathBeforeAIRename;
+        const haveFallbackSimple = !!cardData.originalFilename;
+        const showUndo = !!dl.aiName && (haveStoredSimple || haveFallbackSimple);
+        undoEl.style.display = showUndo ? 'inline-block' : 'none';
+      }
 
       masterTooltipDOMElement.setAttribute('data-visible', 'true');
+    }
+
+    function scheduleImagePreviewRetry(key) {
+      try {
+        const attempts = imagePreviewRetryState.get(key) || 0;
+        if (attempts >= 15) return;
+        imagePreviewRetryState.set(key, attempts + 1);
+        setTimeout(() => {
+          try {
+            // Handle case where key changed due to AI rename: try fallback lookup
+            let cd = activeDownloadCards.get(key);
+            if (!cd) {
+              try {
+                for (const v of activeDownloadCards.values()) {
+                  if (v && (v.trueOriginalPathBeforeAIRename === key)) { cd = v; break; }
+                }
+              } catch (_) {}
+            }
+            if (!cd) return;
+            // Re-run update for this card only; bypass throttle for quick retry
+            createOrUpdateCard(cd.download, false);
+          } catch (_) {}
+        }, 300);
+      } catch (_) {}
+    }
+
+    // Simple context menu for preview pods
+    let contextMenuEl = null;
+    function ensureContextMenu() {
+      if (contextMenuEl) return contextMenuEl;
+      contextMenuEl = document.createElement('div');
+      contextMenuEl.id = 'ztd-context-menu';
+      contextMenuEl.style.cssText = [
+        'position: fixed',
+        'z-index: 100000000',
+        'min-width: 180px',
+        'background: rgba(20,20,20,0.98)',
+        'backdrop-filter: blur(20px)',
+        'border: 1px solid rgba(255,255,255,0.1)',
+        'border-radius: 8px',
+        'box-shadow: 0 8px 24px rgba(0,0,0,0.35)',
+        'padding: 6px 0',
+        'display: none',
+        'pointer-events: auto',
+        'color: #fff',
+        'font-size: 12px'
+      ].join(';');
+      document.documentElement.appendChild(contextMenuEl);
+      document.addEventListener('click', () => hideContextMenu(), true);
+      document.addEventListener('contextmenu', () => hideContextMenu(), true);
+      return contextMenuEl;
+    }
+    function hideContextMenu() {
+      if (contextMenuEl) contextMenuEl.style.display = 'none';
+    }
+    function menuItem(label, onClick) {
+      const item = document.createElement('div');
+      item.textContent = label;
+      item.style.cssText = [
+        'padding: 8px 12px',
+        'cursor: pointer'
+      ].join(';');
+      item.addEventListener('mouseenter', () => { item.style.background = 'rgba(255,255,255,0.08)'; });
+      item.addEventListener('mouseleave', () => { item.style.background = 'transparent'; });
+      item.addEventListener('click', (e) => { e.stopPropagation(); hideContextMenu(); try { onClick(); } catch(_){} });
+      return item;
+    }
+    function showContextMenuForPod(key, x, y) {
+      try {
+        const menu = ensureContextMenu();
+        menu.innerHTML = '';
+        const cardData = activeDownloadCards.get(key);
+        const dl = cardData?.download;
+        menu.appendChild(menuItem('Open file', () => {
+          try {
+            openDownloadedFile(dl);
+          } catch(_) {}
+        }));
+        menu.appendChild(menuItem('Show All Downloads', () => {
+          try {
+            // If a Downloads tab already exists, select it
+            try {
+              if (window.gBrowser && Array.isArray(window.gBrowser.tabs)) {
+                const existing = window.gBrowser.tabs.find(t => {
+                  try { return t?.linkedBrowser?.currentURI?.spec?.startsWith('about:downloads'); } catch { return false; }
+                });
+                if (existing) {
+                  debugLog('[ContextMenu] Selecting existing about:downloads tab');
+                  window.gBrowser.selectedTab = existing;
+                  return;
+                }
+              }
+            } catch(_) {}
+
+            // Prefer privileged helpers
+            if (typeof window.openTrustedLinkIn === 'function') {
+              debugLog('[ContextMenu] Opening about:downloads via openTrustedLinkIn');
+              window.openTrustedLinkIn('about:downloads', 'tab');
+            } else if (typeof window.openUILinkIn === 'function') {
+              debugLog('[ContextMenu] Opening about:downloads via openUILinkIn');
+              window.openUILinkIn('about:downloads', 'tab');
+            } else if (window.DownloadsPanel && typeof window.DownloadsPanel.showDownloadsHistory === 'function') {
+              debugLog('[ContextMenu] Opening downloads history via DownloadsPanel.showDownloadsHistory');
+              window.DownloadsPanel.showDownloadsHistory();
+            } else if (window.BrowserCommands && typeof window.BrowserCommands.openDownloads === 'function') {
+              debugLog('[ContextMenu] Opening downloads via BrowserCommands.openDownloads');
+              window.BrowserCommands.openDownloads();
+            } else if (window.gBrowser && typeof window.gBrowser.loadOneTab === 'function') {
+              debugLog('[ContextMenu] Opening about:downloads via gBrowser.loadOneTab');
+              const tab = window.gBrowser.loadOneTab('about:downloads', { inBackground: false });
+              window.gBrowser.selectedTab = tab;
+            } else if (window.gBrowser) {
+              debugLog('[ContextMenu] Opening about:downloads via gBrowser.addTab');
+              const tab = window.gBrowser.addTab('about:downloads');
+              window.gBrowser.selectedTab = tab;
+            } else {
+              debugLog('[ContextMenu] Opening about:downloads via window.open (last resort)');
+              window.open('about:downloads', '_blank');
+            }
+          } catch (e) {
+            debugLog('[ContextMenu] Failed to open about:downloads, falling back to window.open', e);
+            try { window.open('about:downloads', '_blank'); } catch(_) {}
+          }
+        }));
+        menu.appendChild(menuItem('Dismiss this download', () => {
+          try {
+            dismissedDownloads.add(key);
+            const cd = activeDownloadCards.get(key);
+            if (cd?.podElement) cd.podElement.remove();
+            activeDownloadCards.delete(key);
+            const idx = orderedPodKeys.indexOf(key);
+            if (idx !== -1) orderedPodKeys.splice(idx, 1);
+            if (focusedDownloadKey === key) {
+              // On dismiss from context menu, do not auto-focus or reopen tooltip
+              focusedDownloadKey = null;
+              masterTooltipDOMElement.setAttribute('data-visible', 'false');
+            }
+          } catch(_) {}
+        }));
+        // Initial position
+        menu.style.left = `${x}px`;
+        menu.style.top = `${y}px`;
+        menu.style.display = 'block';
+        // Clamp within viewport
+        try {
+          const rect = menu.getBoundingClientRect();
+          const margin = 6;
+          let left = Math.min(Math.max(margin, x), window.innerWidth - rect.width - margin);
+          let top = Math.min(Math.max(margin, y), window.innerHeight - rect.height - margin);
+          menu.style.left = `${Math.max(0, left)}px`;
+          menu.style.top = `${Math.max(0, top)}px`;
+        } catch(_) {}
+      } catch (_) {}
     }
 
     function formatFileSize(bytes) {
