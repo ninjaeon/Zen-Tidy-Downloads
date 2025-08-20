@@ -110,7 +110,9 @@
     "type": "string",
     "property": "extensions.downloads.openrouter_api_key",
     "label": "OpenRouter API key",
+    "placeholder": "Enter your OpenRouter API key here",
     "sensitive": true,
+    "default": "",
     "restart": true
   },
   {
