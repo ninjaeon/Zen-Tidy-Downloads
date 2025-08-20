@@ -19,8 +19,5 @@
     "fx-autoconfig",
     "Downloads",
     "Tidy Pack"
-  ],
-  "createdAt": "2025-05-24",
-  "updatedAt": "2025-08-20",
-  "fork": ["zen"]
+  ]
 }
