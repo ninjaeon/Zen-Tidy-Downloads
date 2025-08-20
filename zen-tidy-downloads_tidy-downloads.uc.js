@@ -548,12 +548,15 @@
     function getActiveAIProvider() {
       try {
         if (!getPref('extensions.downloads.enable_ai_renaming', true)) return null;
-        // Priority: mistral, openai, anthropic, gemini, deepseek, ollama
+        // Priority: mistral, openai, openrouter, anthropic, gemini, deepseek, ollama
         if (getPref('extensions.downloads.mistral_enabled', false)) {
           if (getPref('extensions.downloads.mistral_api_key', '')) return 'mistral';
         }
         if (getPref('extensions.downloads.openai_enabled', false)) {
           if (getPref('extensions.downloads.openai_api_key', '')) return 'openai';
+        }
+        if (getPref('extensions.downloads.openrouter_enabled', false)) {
+          if (getPref('extensions.downloads.openrouter_api_key', '')) return 'openrouter';
         }
         if (getPref('extensions.downloads.anthropic_enabled', false)) {
           if (getPref('extensions.downloads.anthropic_api_key', '')) return 'anthropic';
@@ -1508,6 +1511,8 @@ async function callAI({ prompt, localPath, fileExtension, abortSignal }) {
       return await callMistralAPI({ prompt, localPath, fileExtension, abortSignal });
     case 'openai':
       return await callOpenAIAPI({ prompt, abortSignal });
+    case 'openrouter':
+      return await callOpenRouterAPI({ prompt, localPath, fileExtension, abortSignal });
     case 'anthropic':
       return await callAnthropicAPI({ prompt, abortSignal });
     case 'gemini':
@@ -1609,6 +1614,63 @@ async function callOpenAIAPI({ prompt, abortSignal }) {
     return text?.trim() || null;
   } catch (e) {
     console.error('OpenAI API error:', e);
+    return null;
+  }
+}
+
+// OpenRouter
+async function callOpenRouterAPI({ prompt, localPath, fileExtension, abortSignal }) {
+  try {
+    const apiKey = getPref('extensions.downloads.openrouter_api_key', '');
+    if (!apiKey) return null;
+    const model = getPref('extensions.downloads.openrouter_model', 'openrouter/auto');
+    const url = getPref('extensions.downloads.openrouter_api_url', 'https://openrouter.ai/api/v1/chat/completions');
+
+    // Build OpenAI-compatible messages with optional image content
+    const content = [{ type: 'text', text: prompt }];
+    if (localPath) {
+      try {
+        const base64 = fileToBase64(localPath);
+        if (base64) {
+          const mimeType = getMimeTypeFromExtension(fileExtension);
+          content.push({
+            type: 'image_url',
+            image_url: { url: `data:${mimeType};base64,${base64}` }
+          });
+        }
+      } catch (_) {}
+    }
+
+    const payload = {
+      model,
+      messages: [{ role: 'user', content }],
+      max_tokens: 100,
+      temperature: 0.2,
+    };
+
+    if (abortSignal?.aborted) {
+      throw new DOMException('API request was aborted', 'AbortError');
+    }
+
+    const resp = await fetch(url, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${apiKey}`,
+      },
+      body: JSON.stringify(payload),
+      signal: abortSignal,
+    });
+    if (!resp.ok) {
+      if (resp.status === 429) return 'rate-limited';
+      debugLog(`OpenRouter error ${resp.status}: ${resp.statusText}`);
+      return null;
+    }
+    const data = await resp.json();
+    const out = data.choices?.[0]?.message?.content?.trim() || null;
+    return out;
+  } catch (e) {
+    console.error('OpenRouter API error:', e);
     return null;
   }
 }
@@ -2051,6 +2113,9 @@ function fileToBase64(localPath) {
           break;
         case 'openai':
           result = await callOpenAIAPI({ prompt: testPrompt, abortSignal: undefined });
+          break;
+        case 'openrouter':
+          result = await callOpenRouterAPI({ prompt: testPrompt, localPath: null, fileExtension: '', abortSignal: undefined });
           break;
         case 'anthropic':
           result = await callAnthropicAPI({ prompt: testPrompt, abortSignal: undefined });

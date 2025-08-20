@@ -97,6 +97,38 @@
   },
   {
     "type": "separator",
+    "label": "OpenRouter Provider"
+  },
+  {
+    "property": "extensions.downloads.openrouter_enabled",
+    "type": "checkbox",
+    "label": "Enable OpenRouter AI provider",
+    "defaultValue": false,
+    "restart": true
+  },
+  {
+    "type": "string",
+    "property": "extensions.downloads.openrouter_api_key",
+    "label": "OpenRouter API key",
+    "sensitive": true,
+    "restart": true
+  },
+  {
+    "type": "string",
+    "property": "extensions.downloads.openrouter_model",
+    "label": "OpenRouter model name",
+    "default": "openrouter/auto",
+    "restart": true
+  },
+  {
+    "property": "extensions.downloads.openrouter_api_url",
+    "type": "string",
+    "label": "OpenRouter API endpoint URL",
+    "default": "https://openrouter.ai/api/v1/chat/completions",
+    "restart": true
+  },
+  {
+    "type": "separator",
     "label": "Anthropic Provider"
   },
   {

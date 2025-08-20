@@ -8,8 +8,12 @@
   "style": "https://raw.githubusercontent.com/ninjaeon/Zen-Tidy-Downloads/all-api/chrome.css",
   "js": true,
   "preferences": "https://raw.githubusercontent.com/ninjaeon/Zen-Tidy-Downloads/all-api/preferences.json",
+  "scripts": [
+    "https://raw.githubusercontent.com/ninjaeon/Zen-Tidy-Downloads/all-api/zen-tidy-downloads_tidy-downloads.uc.js",
+    "https://raw.githubusercontent.com/ninjaeon/Zen-Tidy-Downloads/all-api/zen-tidy-downloads_zen-stuff.uc.js"
+  ],
   "author": "Anoms12",
-  "version": "2.0.1",
+  "version": "2.0.2",
   "tags": [
     "sine",
     "fx-autoconfig",
@@ -17,6 +21,6 @@
     "Tidy Pack"
   ],
   "createdAt": "2025-05-24",
-  "updatedAt": "2025-08-17",
+  "updatedAt": "2025-08-20",
   "fork": ["zen"]
 }
