@@ -2,16 +2,12 @@
   "id": "zen-tidy-downloads-fork",
   "name": "Tidy Downloads (Fork)",
   "description": "Clean up your downloads with AI",
-  "homepage": "https://raw.githubusercontent.com/ninjaeon/Zen-Tidy-Downloads/all-api/",
+  "homepage": "https://github.com/ninjaeon/Zen-Tidy-Downloads/tree/all-api",
   "readme": "https://raw.githubusercontent.com/ninjaeon/Zen-Tidy-Downloads/all-api/README.md",
   "image": "https://raw.githubusercontent.com/ninjaeon/Zen-Tidy-Downloads/all-api/image.png",
   "style": "https://raw.githubusercontent.com/ninjaeon/Zen-Tidy-Downloads/all-api/chrome.css",
-  "js": true,
   "preferences": "https://raw.githubusercontent.com/ninjaeon/Zen-Tidy-Downloads/all-api/preferences.json",
-  "scripts": [
-    "https://raw.githubusercontent.com/ninjaeon/Zen-Tidy-Downloads/all-api/tidy-downloads.uc.js",
-    "https://raw.githubusercontent.com/ninjaeon/Zen-Tidy-Downloads/all-api/zen-stuff.uc.js"
-  ],
+  "js": "https://raw.githubusercontent.com/ninjaeon/Zen-Tidy-Downloads/all-api/tidy-downloads.uc.js",
   "author": "Anoms12",
   "version": "2.0.3",
   "tags": [
