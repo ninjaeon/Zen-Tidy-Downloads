@@ -10,7 +10,7 @@
   "use strict";
 
   // Visible runtime version banner for console verification
-  const ZEN_TIDY_VERSION = '2.0.1';
+  const ZEN_TIDY_VERSION = '2.0.3';
 
   // Use Components for Firefox compatibility
   const { classes: Cc, interfaces: Ci } = Components;
