@@ -324,6 +324,38 @@
       return dismissedData;
     }
 
+    // Record and notify listeners about a pod dismissal
+    function notifyPodDismissed(downloadKey, source = 'unknown') {
+      try {
+        // Ensure dismissed set contains key
+        dismissedDownloads.add(downloadKey);
+
+        // Capture and store data if missing
+        if (!dismissedPodsData.has(downloadKey)) {
+          const data = capturePodDataForDismissal(downloadKey);
+          if (data) {
+            dismissedPodsData.set(downloadKey, data);
+          }
+        }
+
+        const podData = dismissedPodsData.get(downloadKey);
+        if (!podData) return;
+
+        // Notify registered JS listeners
+        try {
+          dismissEventListeners.forEach(cb => {
+            try { cb(podData); } catch (_) {}
+          });
+        } catch (_) {}
+
+        // Also dispatch a DOM event for looser coupling
+        fireCustomEvent('pod-dismissed', { podData, source });
+        debugLog(`[Dismiss] Notified listeners for ${downloadKey}`);
+      } catch (e) {
+        debugLog('[Dismiss] Error notifying dismissal', e);
+      }
+    }
+
     // Function to check if required CSS styles are loaded
     function checkCSSAvailability() {
       try {
@@ -1003,7 +1035,8 @@
                 masterTooltipDOMElement.setAttribute('data-visible', 'false');
                 return;
               }
-              dismissedDownloads.add(key);
+              // Notify the dismissal system first so listeners capture pod data
+              notifyPodDismissed(key, 'tooltip-close');
               const cd = activeDownloadCards.get(key);
               if (cd?.podElement) cd.podElement.remove();
               activeDownloadCards.delete(key);
@@ -1035,6 +1068,33 @@
         const view = {
           onDownloadAdded: (download) => {
             debugLog('[Downloads] Added', { id: download.id, path: download.target?.path });
+            try {
+              const autoDismiss = getPref('extensions.downloads.auto_dismiss_previous_on_new', false);
+              if (autoDismiss) {
+                const newKey = getDownloadKey(download);
+                let dismissedCount = 0;
+                // Dismiss all currently active pods except the new one
+                for (const [key, cd] of Array.from(activeDownloadCards.entries())) {
+                  if (key === newKey) continue;
+                  if (dismissedDownloads.has(key)) continue;
+                  try {
+                    // Notify dismissal system so listeners capture pod data
+                    notifyPodDismissed(key, 'auto-on-new');
+                    // Remove UI pod and clean internal state
+                    if (cd?.podElement) cd.podElement.remove();
+                    activeDownloadCards.delete(key);
+                    const idx = orderedPodKeys.indexOf(key);
+                    if (idx !== -1) orderedPodKeys.splice(idx, 1);
+                    if (focusedDownloadKey === key) {
+                      focusedDownloadKey = null;
+                      try { masterTooltipDOMElement.setAttribute('data-visible', 'false'); } catch (_) {}
+                    }
+                    dismissedCount++;
+                  } catch (_) {}
+                }
+                debugLog('[AutoDismiss] Dismissed existing pods before adding new download', { count: dismissedCount, newKey });
+              }
+            } catch (_) {}
             throttledCreateOrUpdateCard(download, true);
           },
           onDownloadChanged: (download) => {
@@ -1420,7 +1480,8 @@
         }));
         menu.appendChild(menuItem('Dismiss this download', () => {
           try {
-            dismissedDownloads.add(key);
+            // Notify the dismissal system first so listeners capture pod data
+            notifyPodDismissed(key, 'context-menu');
             const cd = activeDownloadCards.get(key);
             if (cd?.podElement) cd.podElement.remove();
             activeDownloadCards.delete(key);
@@ -1468,6 +1529,233 @@
       } catch { return ''; }
     }
 
+    // Minimal Dismissed Downloads Pile UI
+    function initDismissedPileUI() {
+      try {
+        if (document.getElementById('ztd-dismissed-pile')) return;
+
+        const container = document.createElement('div');
+        container.id = 'ztd-dismissed-pile';
+        container.style.cssText = [
+          'position: fixed',
+          'left: 12px',
+          // Leave room for Firefox's hover URL status panel at the bottom-left
+          'bottom: 36px',
+          'z-index: 52',
+          'background: rgba(0,0,0,0.75)',
+          'backdrop-filter: blur(10px)',
+          'color: #fff',
+          'border-radius: 8px',
+          'padding: 6px 8px',
+          'font-size: 11px',
+          'display: none',
+          'pointer-events: auto',
+          'box-shadow: 0 3px 10px rgba(0,0,0,0.3)'
+        ].join(';');
+
+        const countEl = document.createElement('span');
+        countEl.className = 'ztd-pile-count';
+        countEl.style.marginRight = '8px';
+
+        const fullListBtn = document.createElement('button');
+        fullListBtn.textContent = 'Full list';
+        fullListBtn.title = 'Show all dismissed downloads';
+        fullListBtn.style.cssText = 'margin-right:6px; background:transparent; border:1px solid rgba(255,255,255,0.2); color:#fff; border-radius:6px; padding:2px 6px; cursor:pointer;';
+
+        const clearAllBtn = document.createElement('button');
+        clearAllBtn.textContent = 'Clear all';
+        clearAllBtn.title = 'Remove all items from pile';
+        clearAllBtn.style.cssText = 'background:transparent; border:1px solid rgba(255,255,255,0.2); color:#fff; border-radius:6px; padding:2px 6px; cursor:pointer;';
+
+        const listWrap = document.createElement('div');
+        listWrap.id = 'ztd-pile-list';
+        listWrap.style.cssText = 'margin-top:6px; display:none; max-height:40vh; overflow:auto; min-width:260px;';
+
+        const rowDivider = () => {
+          const hr = document.createElement('div');
+          hr.style.cssText = 'height:1px; background:rgba(255,255,255,0.12); margin:6px -8px';
+          return hr;
+        };
+
+        container.appendChild(countEl);
+        container.appendChild(fullListBtn);
+        container.appendChild(clearAllBtn);
+        const dividerEl = rowDivider();
+        dividerEl.style.display = 'none';
+        container.appendChild(dividerEl);
+        container.appendChild(listWrap);
+        document.documentElement.appendChild(container);
+
+        const alwaysShow = !!getPref('zen.stuff-pile.always-show', false);
+
+        function getCount() {
+          try { return window.zenTidyDownloads?.dismissedPods?.count?.() || 0; } catch { return 0; }
+        }
+        function updateCount() {
+          countEl.textContent = `Dismissed: ${getCount()}`;
+        }
+        function updateVisibility() {
+          const shouldShow = alwaysShow || getCount() > 0;
+          container.style.display = shouldShow ? 'block' : 'none';
+        }
+        function renderList() {
+          try {
+            listWrap.innerHTML = '';
+            const map = window.zenTidyDownloads?.dismissedPods?.getAll?.();
+            const entries = map ? Array.from(map.entries()) : [];
+            if (!entries.length) {
+              const empty = document.createElement('div');
+              empty.textContent = 'No dismissed items';
+              empty.style.cssText = 'opacity:0.6; padding:4px 0';
+              listWrap.appendChild(empty);
+              return;
+            }
+            for (const [podKey, podData] of entries) {
+              const row = document.createElement('div');
+              row.style.cssText = 'display:flex; align-items:center; gap:8px; padding:4px 0;';
+
+              const preview = document.createElement('div');
+              preview.style.cssText = 'width:28px; height:28px; border-radius:6px; background:rgba(255,255,255,0.08); display:flex; align-items:center; justify-content:center; overflow:hidden; flex-shrink:0;';
+              try {
+                if (podData?.previewData?.type === 'image' && podData?.previewData?.src) {
+                  const img = document.createElement('img');
+                  img.src = podData.previewData.src;
+                  img.style.cssText = 'width:100%; height:100%; object-fit:cover;';
+                  preview.appendChild(img);
+                } else {
+                  preview.textContent = '⬇';
+                  preview.style.fontSize = '14px';
+                }
+              } catch (_) { preview.textContent = '⬇'; }
+
+              const label = document.createElement('div');
+              label.style.cssText = 'flex:1; min-width:0;';
+              const name = String(podData?.filename || (podKey?.split?.(/[\\/]/).pop()) || podKey || '').trim();
+              label.textContent = name || '(unknown)';
+              label.title = name;
+              label.style.cssText += ' white-space:nowrap; overflow:hidden; text-overflow:ellipsis; opacity:0.9;';
+
+              const actions = document.createElement('div');
+              actions.style.cssText = 'display:flex; gap:6px;';
+
+              const restoreBtn = document.createElement('button');
+              restoreBtn.textContent = 'Restore';
+              restoreBtn.title = 'Restore this download card';
+              restoreBtn.style.cssText = 'background:transparent; border:1px solid rgba(255,255,255,0.2); color:#fff; border-radius:6px; padding:2px 6px; cursor:pointer;';
+              restoreBtn.addEventListener('click', async (e) => {
+                e.stopPropagation();
+                try {
+                  const ok = await window.zenTidyDownloads?.restorePod?.(podKey);
+                  if (ok) {
+                    updateCount();
+                    updateVisibility();
+                    renderList();
+                  }
+                } catch (_) {}
+              });
+
+              const removeBtn = document.createElement('button');
+              removeBtn.textContent = 'Remove';
+              removeBtn.title = 'Remove from pile';
+              removeBtn.style.cssText = 'background:transparent; border:1px solid rgba(255,255,255,0.2); color:#fff; border-radius:6px; padding:2px 6px; cursor:pointer;';
+              removeBtn.addEventListener('click', (e) => {
+                e.stopPropagation();
+                try {
+                  window.zenTidyDownloads?.permanentDelete?.(podKey);
+                  updateCount();
+                  updateVisibility();
+                  renderList();
+                } catch (_) {}
+              });
+
+              actions.appendChild(restoreBtn);
+              actions.appendChild(removeBtn);
+
+              row.appendChild(preview);
+              row.appendChild(label);
+              row.appendChild(actions);
+              listWrap.appendChild(row);
+            }
+          } catch (e) {
+            debugLog('[PileUI] renderList error', e);
+          }
+        }
+
+        fullListBtn.addEventListener('click', (e) => {
+          try {
+            e.stopPropagation();
+            const isOpen = listWrap.style.display !== 'none';
+            if (isOpen) {
+              listWrap.style.display = 'none';
+              fullListBtn.textContent = 'Full list';
+              dividerEl.style.display = 'none';
+              // Show download bubbles again when closing the full list
+              try {
+                if (downloadCardsContainer) downloadCardsContainer.style.display = '';
+                if (focusedDownloadKey) updateUIForFocusedDownload(focusedDownloadKey, false);
+              } catch (_) {}
+            } else {
+              renderList();
+              listWrap.style.display = 'block';
+              fullListBtn.textContent = 'Hide list';
+              dividerEl.style.display = 'block';
+              // Hide download bubbles while viewing the full dismissed list
+              try {
+                if (downloadCardsContainer) downloadCardsContainer.style.display = 'none';
+                if (masterTooltipDOMElement) masterTooltipDOMElement.setAttribute('data-visible', 'false');
+              } catch (_) {}
+            }
+          } catch (_) {}
+        });
+
+        clearAllBtn.addEventListener('click', (e) => {
+          try {
+            e.stopPropagation();
+            const map = window.zenTidyDownloads?.dismissedPods?.getAll?.();
+            if (map && map.size) {
+              for (const [k] of map.entries()) {
+                try { window.zenTidyDownloads?.permanentDelete?.(k); } catch (_) {}
+              }
+              updateCount();
+              updateVisibility();
+              if (listWrap.style.display !== 'none') renderList();
+            }
+          } catch (_) {}
+        });
+
+        // Wire to events
+        try {
+          window.zenTidyDownloads?.onPodDismissed?.((podData) => {
+            try {
+              updateCount();
+              updateVisibility();
+              if (listWrap.style.display !== 'none') renderList();
+            } catch (_) {}
+          });
+        } catch (_) {}
+
+        try {
+          window.zenTidyDownloads?.onActualDownloadRemoved?.((podKey) => {
+            try {
+              // If an item is actually removed from Firefox list, drop it from pile too
+              if (window.zenTidyDownloads?.dismissedPods?.get?.(podKey)) {
+                window.zenTidyDownloads?.permanentDelete?.(podKey);
+                if (listWrap.style.display !== 'none') renderList();
+              }
+            } catch (_) {}
+            updateCount();
+            updateVisibility();
+          });
+        } catch (_) {}
+
+        // Initial state
+        updateCount();
+        updateVisibility();
+      } catch (e) {
+        debugLog('[PileUI] init failed', e);
+      }
+    }
+
     // Robust initialization with CSS timing fix
     async function init() {
       console.log(`=== Zen Tidy Downloads STARTING (version ${ZEN_TIDY_VERSION}) ===`);
@@ -1497,6 +1785,7 @@
       // Build UI and wire listeners now that CSS is present
       ensureUIContainers();
       await setupDownloadListeners();
+      initDismissedPileUI();
       try { initSidebarWidthSync && initSidebarWidthSync(); } catch (_) {}
       console.log('=== Zen Tidy Downloads READY ===');
     }

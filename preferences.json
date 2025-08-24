@@ -300,6 +300,12 @@
     "defaultValue": true
   },
   {
+    "property": "extensions.downloads.auto_dismiss_previous_on_new",
+    "type": "checkbox",
+    "label": "Auto-dismiss previous downloads when a new download starts",
+    "defaultValue": false
+  },
+  {
     "type": "separator",
     "label": "AI Rename Settings"
   },
