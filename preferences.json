@@ -1,9 +1,287 @@
 [
   {
+    "type": "separator",
+    "label": "Mistral AI Provider"
+  },
+  {
+    "property": "extensions.downloads.mistral_enabled",
+    "type": "checkbox",
+    "label": "Enable Mistral AI provider",
+    "defaultValue": false,
+    "restart": true
+  },
+  {
     "property": "extensions.downloads.mistral_api_key",
-    "label": "Mistral API key for AI-powered download renaming",
+    "label": "Mistral API key",
     "type": "string",
-    "placeholder": "Enter your Mistral API key here"
+    "placeholder": "Enter your Mistral API key here",
+    "sensitive": true,
+    "restart": true
+  },
+  {
+    "type": "dropdown",
+    "property": "extensions.downloads.mistral_model",
+    "label": "Mistral model name",
+    "value": "string",
+    "default": "mistral-small-latest",
+    "placeholder": false,
+    "options": [
+      { "label": "Mistral Small (latest)", "value": "mistral-small-latest" },
+      { "label": "Mistral Medium (latest)", "value": "mistral-medium-latest" },
+      { "label": "Mistral Large (latest)", "value": "mistral-large-latest" },
+      { "label": "Magistral Medium (2507)", "value": "magistral-medium-2507" },
+      { "label": "Magistral Small (2507)", "value": "magistral-small-2507" },
+      { "label": "Devstral Medium (2507)", "value": "devstral-medium-2507" },
+      { "label": "Devstral Small (2507)", "value": "devstral-small-2507" },
+      { "label": "Codestral (2508)", "value": "codestral-2508" },
+      { "label": "Codestral (2501)", "value": "codestral-2501" },
+      { "label": "Open Mistral Nemo", "value": "open-mistral-nemo" },
+      { "label": "Pixtral Large (2411)", "value": "pixtral-large-2411" },
+      { "label": "Pixtral 12B (2409)", "value": "pixtral-12b-2409" }
+    ],
+    "restart": true
+  },
+  {
+    "property": "extensions.downloads.mistral_api_url",
+    "type": "string",
+    "label": "Mistral API endpoint URL",
+    "default": "https://api.mistral.ai/v1/chat/completions",
+    "restart": true
+  },
+  {
+    "type": "separator",
+    "label": "OpenAI Provider"
+  },
+  {
+    "property": "extensions.downloads.openai_enabled",
+    "type": "checkbox",
+    "label": "Enable OpenAI API provider",
+    "defaultValue": false,
+    "restart": true
+  },
+  {
+    "type": "string",
+    "property": "extensions.downloads.openai_api_key",
+    "label": "OpenAI API key",
+    "sensitive": true,
+    "restart": true
+  },
+  {
+    "type": "dropdown",
+    "property": "extensions.downloads.openai_model",
+    "label": "OpenAI model name",
+    "value": "string",
+    "default": "gpt-5-nano",
+    "placeholder": false,
+    "options": [
+      { "label": "GPT-5", "value": "gpt-5" },
+      { "label": "GPT-5 Mini", "value": "gpt-5-mini" },
+      { "label": "GPT-5 Nano", "value": "gpt-5-nano" },
+      { "label": "GPT-4.1", "value": "gpt-4.1" },
+      { "label": "GPT-4.1 Mini", "value": "gpt-4.1-mini" },
+      { "label": "GPT-4o", "value": "gpt-4o" },
+      { "label": "GPT-4o Mini", "value": "gpt-4o-mini" },
+      { "label": "O3", "value": "o3" },
+      { "label": "O3 Pro", "value": "o3-pro" },
+      { "label": "O3 Mini", "value": "o3-mini" },
+      { "label": "O4 Mini", "value": "o4-mini" }
+    ],
+    "restart": true
+  },
+  {
+    "property": "extensions.downloads.openai_api_url",
+    "type": "string",
+    "label": "OpenAI API endpoint URL",
+    "default": "https://api.openai.com/v1/chat/completions",
+    "restart": true
+  },
+  {
+    "type": "separator",
+    "label": "OpenRouter Provider"
+  },
+  {
+    "property": "extensions.downloads.openrouter_enabled",
+    "type": "checkbox",
+    "label": "Enable OpenRouter AI provider",
+    "defaultValue": false,
+    "restart": true
+  },
+  {
+    "type": "string",
+    "property": "extensions.downloads.openrouter_api_key",
+    "label": "OpenRouter API key",
+    "placeholder": "Enter your OpenRouter API key here",
+    "sensitive": true,
+    "default": "",
+    "restart": true
+  },
+  {
+    "type": "string",
+    "property": "extensions.downloads.openrouter_model",
+    "label": "OpenRouter model name",
+    "default": "openrouter/auto",
+    "restart": true
+  },
+  {
+    "property": "extensions.downloads.openrouter_api_url",
+    "type": "string",
+    "label": "OpenRouter API endpoint URL",
+    "default": "https://openrouter.ai/api/v1/chat/completions",
+    "restart": true
+  },
+  {
+    "type": "separator",
+    "label": "Anthropic Provider"
+  },
+  {
+    "property": "extensions.downloads.anthropic_enabled",
+    "type": "checkbox",
+    "label": "Enable Anthropic API provider",
+    "defaultValue": false,
+    "restart": true
+  },
+  {
+    "type": "string",
+    "property": "extensions.downloads.anthropic_api_key",
+    "label": "Anthropic API key",
+    "sensitive": true,
+    "restart": true
+  },
+  {
+    "type": "dropdown",
+    "property": "extensions.downloads.anthropic_model",
+    "label": "Anthropic model name",
+    "value": "string",
+    "default": "claude-3-5-haiku-latest",
+    "placeholder": false,
+    "options": [
+      { "label": "Claude Opus 4.1 (latest)", "value": "claude-opus-4-1-latest" },
+      { "label": "Claude Opus 4 (latest)", "value": "claude-opus-4-latest" },
+      { "label": "Claude Sonnet 4 (latest)", "value": "claude-sonnet-4-latest" },
+      { "label": "Claude 3.7 Sonnet (latest)", "value": "claude-3-7-sonnet-latest" },
+      { "label": "Claude 3.5 Sonnet (latest)", "value": "claude-3-5-sonnet-latest" },
+      { "label": "Claude 3.5 Haiku (latest)", "value": "claude-3-5-haiku-latest" }
+    ],
+    "restart": true
+  },
+  {
+    "property": "extensions.downloads.anthropic_api_url",
+    "type": "string",
+    "label": "Anthropic API endpoint URL",
+    "default": "https://api.anthropic.com/v1/messages",
+    "restart": true
+  },
+  {
+    "property": "extensions.downloads.anthropic_version",
+    "type": "string",
+    "label": "Anthropic API version",
+    "default": "2023-06-01",
+    "restart": true
+  },
+  {
+    "type": "separator",
+    "label": "Google Gemini Provider"
+  },
+  {
+    "property": "extensions.downloads.gemini_enabled",
+    "type": "checkbox",
+    "label": "Enable Google Gemini API provider",
+    "defaultValue": false,
+    "restart": true
+  },
+  {
+    "type": "string",
+    "property": "extensions.downloads.gemini_api_key",
+    "label": "Google Gemini API key",
+    "sensitive": true,
+    "restart": true
+  },
+  {
+    "type": "dropdown",
+    "property": "extensions.downloads.gemini_model",
+    "label": "Gemini model name",
+    "value": "string",
+    "default": "gemini-2.5-flash-lite",
+    "placeholder": false,
+    "options": [
+      { "label": "Gemini 2.0 Flash", "value": "gemini-2.0-flash" },
+      { "label": "Gemini 2.0 Flash Lite", "value": "gemini-2.0-flash-lite" },
+      { "label": "Gemini 2.5 Flash Lite", "value": "gemini-2.5-flash-lite" },
+      { "label": "Gemini 2.5 Flash", "value": "gemini-2.5-flash" },
+      { "label": "Gemini 2.5 Pro", "value": "gemini-2.5-pro" }
+    ],
+    "restart": true
+  },
+  {
+    "property": "extensions.downloads.gemini_api_url",
+    "type": "string",
+    "label": "Gemini API base URL",
+    "default": "https://generativelanguage.googleapis.com/v1beta/models/",
+    "restart": true
+  },
+  {
+    "type": "separator",
+    "label": "DeepSeek Provider"
+  },
+  {
+    "property": "extensions.downloads.deepseek_enabled",
+    "type": "checkbox",
+    "label": "Enable DeepSeek AI provider",
+    "defaultValue": false,
+    "restart": true
+  },
+  {
+    "type": "string",
+    "property": "extensions.downloads.deepseek_api_key",
+    "label": "DeepSeek API key",
+    "sensitive": true,
+    "restart": true
+  },
+  {
+    "type": "dropdown",
+    "property": "extensions.downloads.deepseek_model",
+    "label": "DeepSeek model name",
+    "value": "string",
+    "default": "deepseek-chat",
+    "placeholder": false,
+    "options": [
+      { "label": "DeepSeek Chat", "value": "deepseek-chat" },
+      { "label": "DeepSeek Reasoner (R1)", "value": "deepseek-reasoner" },
+      { "label": "DeepSeek Coder", "value": "deepseek-coder" }
+    ],
+    "restart": true
+  },
+  {
+    "property": "extensions.downloads.deepseek_api_url",
+    "type": "string",
+    "label": "DeepSeek API endpoint URL",
+    "default": "https://api.deepseek.com/chat/completions",
+    "restart": true
+  },
+  {
+    "type": "separator",
+    "label": "Ollama (Local) Provider"
+  },
+  {
+    "property": "extensions.downloads.ollama_enabled",
+    "type": "checkbox",
+    "label": "Enable Ollama AI provider (Local)",
+    "defaultValue": false,
+    "restart": true
+  },
+  {
+    "type": "string",
+    "property": "extensions.downloads.ollama_endpoint",
+    "label": "Ollama API endpoint URL",
+    "default": "http://localhost:11434/api/generate",
+    "restart": true
+  },
+  {
+    "type": "string",
+    "property": "extensions.downloads.ollama_model",
+    "label": "Ollama model name",
+    "default": "llama3.1:latest",
+    "restart": true
   },
   {
     "type": "separator",
@@ -20,6 +298,23 @@
     "type": "checkbox", 
     "label": "Enable AI-powered file renaming",
     "defaultValue": true
+  },
+  {
+    "property": "extensions.downloads.auto_dismiss_previous_on_new",
+    "type": "checkbox",
+    "label": "Auto-dismiss previous downloads when a new download starts",
+    "defaultValue": false
+  },
+  {
+    "type": "separator",
+    "label": "AI Rename Settings"
+  },
+  {
+    "property": "extensions.downloads.ai_call_timeout_ms",
+    "type": "string",
+    "value": "number",
+    "label": "AI call timeout (ms)",
+    "default": 20000
   },
   {
     "type": "separator",
@@ -57,7 +352,7 @@
     "label": "Show old completed downloads on startup (hours)",
     "default": 2
   },
-    {
+  {
     "type": "separator",
     "label": "Zen Stuff"
   },
@@ -67,4 +362,4 @@
     "label": "Makes the Stuff pile always show (Hold Alt to temporarily hide the pile)",
     "defaultValue": true
   }
-] 
+]

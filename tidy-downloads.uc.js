@@ -2177,7 +2177,7 @@
         }, 300); // Match tooltip animation duration
       } else {
         // If not focused, just remove the pod directly
-        debugLog(`[AutohideSequence] Item ${downloadKey} not focused, removing pod directly`);
+      debugLog("[AutohideSequence] Item ${downloadKey} not focused, removing pod directly");
         await removeCard(downloadKey, false);
       }
     } catch (e) {
@@ -2208,7 +2208,63 @@
     }
   }
 
+  // Decide active AI provider based on toggles and available credentials
+  function getActiveAIProvider() {
+    try {
+      if (!getPref('extensions.downloads.enable_ai_renaming', true)) return null;
+      // Priority: mistral, openai, openrouter, anthropic, gemini, deepseek, ollama
+      if (getPref('extensions.downloads.mistral_enabled', false)) {
+        if (getPref('extensions.downloads.mistral_api_key', '')) return 'mistral';
+      }
+      if (getPref('extensions.downloads.openai_enabled', false)) {
+        if (getPref('extensions.downloads.openai_api_key', '')) return 'openai';
+      }
+      if (getPref('extensions.downloads.openrouter_enabled', false)) {
+        if (getPref('extensions.downloads.openrouter_api_key', '')) return 'openrouter';
+      }
+      if (getPref('extensions.downloads.anthropic_enabled', false)) {
+        if (getPref('extensions.downloads.anthropic_api_key', '')) return 'anthropic';
+      }
+      if (getPref('extensions.downloads.gemini_enabled', false)) {
+        if (getPref('extensions.downloads.gemini_api_key', '')) return 'gemini';
+      }
+      if (getPref('extensions.downloads.deepseek_enabled', false)) {
+        if (getPref('extensions.downloads.deepseek_api_key', '')) return 'deepseek';
+      }
+      if (getPref('extensions.downloads.ollama_enabled', false)) {
+        // Ollama is local; no key required
+        return 'ollama';
+      }
+      return null;
+    } catch (_) {
+      return null;
+    }
+  }
 
+  // Unified AI dispatcher; routes to the selected provider
+  async function callAI({ prompt, localPath, fileExtension, abortSignal }) {
+    const provider = getActiveAIProvider();
+    debugLog('[AI] Selected provider for call', { provider }, 'aiRename');
+    if (!provider) return null;
+    switch (provider) {
+      case 'mistral':
+        return await callMistralAPI({ prompt, localPath, fileExtension, abortSignal });
+      case 'openai':
+        return await callOpenAIAPI({ prompt, abortSignal });
+      case 'openrouter':
+        return await callOpenRouterAPI({ prompt, localPath, fileExtension, abortSignal });
+      case 'anthropic':
+        return await callAnthropicAPI({ prompt, abortSignal });
+      case 'gemini':
+        return await callGeminiAPI({ prompt, abortSignal });
+      case 'deepseek':
+        return await callDeepSeekAPI({ prompt, abortSignal });
+      case 'ollama':
+        return await callOllamaAPI({ prompt, localPath, fileExtension, abortSignal });
+      default:
+        return null;
+    }
+  }
 
   // Set generic icon for file type
   function setGenericIcon(previewElement, contentType) {
@@ -2672,7 +2728,7 @@ Rules:
 - Maximum length: ${getPref("extensions.downloads.max_filename_length", 70)} characters
 Respond with ONLY the filename.`;
 
-        suggestedName = await callMistralAPI({
+        suggestedName = await callAI({
           prompt: imagePrompt,
           localPath: downloadPath,
           fileExtension: fileExtension,
@@ -2703,7 +2759,7 @@ Rules:
 - Maximum length: ${getPref("extensions.downloads.max_filename_length", 70)} characters
 Respond with ONLY the filename.`;
 
-        suggestedName = await callMistralAPI({
+        suggestedName = await callAI({
           prompt: metadataPrompt,
           localPath: null,
           fileExtension: fileExtension,
@@ -3101,6 +3157,258 @@ Respond with ONLY the filename.`;
     }
   }
 
+  // OpenAI
+  async function callOpenAIAPI({ prompt, abortSignal }) {
+    try {
+      const apiKey = getPref('extensions.downloads.openai_api_key', '');
+      if (!apiKey) return null;
+      const model = getPref('extensions.downloads.openai_model', 'gpt-5-nano');
+      const chatUrlPref = getPref('extensions.downloads.openai_api_url', 'https://api.openai.com/v1/chat/completions');
+
+      // Endpoint selection: use Responses API for o3/o4/gpt-4.1/gpt-5 families
+      const useResponses = /^(o3|o4|gpt-4\.1|gpt-5)/.test(model);
+      let url = chatUrlPref;
+      if (useResponses) {
+        url = chatUrlPref.includes('/chat/completions')
+          ? chatUrlPref.replace('/chat/completions', '/responses')
+          : 'https://api.openai.com/v1/responses';
+      }
+
+      // Build payload per endpoint
+      const payload = useResponses
+        ? { model, input: prompt, max_output_tokens: 100, temperature: 0.2 }
+        : { model, messages: [{ role: 'user', content: prompt }], max_tokens: 100, temperature: 0.2 };
+
+      const resp = await fetch(url, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${apiKey}`,
+        },
+        body: JSON.stringify(payload),
+        signal: abortSignal,
+      });
+      if (!resp.ok) {
+        if (resp.status === 429) return 'rate-limited';
+        debugLog(`OpenAI error ${resp.status}: ${resp.statusText}`);
+        return null;
+      }
+      const data = await resp.json();
+
+      if (!useResponses) {
+        return data.choices?.[0]?.message?.content?.trim() || null;
+      }
+
+      // Parse Responses API output robustly
+      let text = null;
+      if (typeof data.output_text === 'string') {
+        text = data.output_text;
+      } else if (Array.isArray(data.output)) {
+        try {
+          for (const out of data.output) {
+            if (Array.isArray(out.content)) {
+              for (const part of out.content) {
+                if (typeof part.text === 'string') {
+                  text = (text ? text + ' ' : '') + part.text;
+                }
+              }
+            }
+          }
+        } catch (e) {
+          debugLog('Failed to parse OpenAI Responses output structure', e);
+        }
+      }
+      if (!text && data.choices?.[0]?.message?.content) {
+        text = data.choices[0].message.content;
+      }
+      return text?.trim() || null;
+    } catch (e) {
+      console.error('OpenAI API error:', e);
+      return null;
+    }
+  }
+
+  // OpenRouter
+  async function callOpenRouterAPI({ prompt, localPath, fileExtension, abortSignal }) {
+    try {
+      const apiKey = getPref('extensions.downloads.openrouter_api_key', '');
+      if (!apiKey) return null;
+      const model = getPref('extensions.downloads.openrouter_model', 'openrouter/auto');
+      const url = getPref('extensions.downloads.openrouter_api_url', 'https://openrouter.ai/api/v1/chat/completions');
+
+      const content = [{ type: 'text', text: prompt }];
+      if (localPath) {
+        try {
+          const base64 = fileToBase64(localPath);
+          if (base64) {
+            const mimeType = getMimeTypeFromExtension(fileExtension);
+            content.push({ type: 'image_url', image_url: { url: `data:${mimeType};base64,${base64}` } });
+          }
+        } catch (_) {}
+      }
+
+      const payload = { model, messages: [{ role: 'user', content }], max_tokens: 100, temperature: 0.2 };
+
+      const resp = await fetch(url, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${apiKey}`,
+        },
+        body: JSON.stringify(payload),
+        signal: abortSignal,
+      });
+      if (!resp.ok) {
+        if (resp.status === 429) return 'rate-limited';
+        debugLog(`OpenRouter error ${resp.status}: ${resp.statusText}`);
+        return null;
+      }
+      const data = await resp.json();
+      return data.choices?.[0]?.message?.content?.trim() || null;
+    } catch (e) {
+      console.error('OpenRouter API error:', e);
+      return null;
+    }
+  }
+
+  // Anthropic Claude
+  async function callAnthropicAPI({ prompt, abortSignal }) {
+    try {
+      const apiKey = getPref('extensions.downloads.anthropic_api_key', '');
+      if (!apiKey) return null;
+      const model = getPref('extensions.downloads.anthropic_model', 'claude-3-5-haiku-latest');
+      const url = getPref('extensions.downloads.anthropic_api_url', 'https://api.anthropic.com/v1/messages');
+      const version = getPref('extensions.downloads.anthropic_version', '2023-06-01');
+      const payload = { model, max_tokens: 100, messages: [{ role: 'user', content: [{ type: 'text', text: prompt }] }] };
+      const resp = await fetch(url, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-api-key': apiKey,
+          'anthropic-version': version,
+        },
+        body: JSON.stringify(payload),
+        signal: abortSignal,
+      });
+      if (!resp.ok) {
+        if (resp.status === 429) return 'rate-limited';
+        debugLog(`Anthropic error ${resp.status}: ${resp.statusText}`);
+        return null;
+      }
+      const data = await resp.json();
+      const text = Array.isArray(data.content) && data.content[0]?.text ? data.content[0].text : null;
+      return text ? String(text).trim() : null;
+    } catch (e) {
+      console.error('Anthropic API error:', e);
+      return null;
+    }
+  }
+
+  // Google Gemini
+  async function callGeminiAPI({ prompt, abortSignal }) {
+    try {
+      const apiKey = getPref('extensions.downloads.gemini_api_key', '');
+      if (!apiKey) return null;
+      const model = getPref('extensions.downloads.gemini_model', 'gemini-2.5-flash-lite');
+      const base = getPref('extensions.downloads.gemini_api_url', 'https://generativelanguage.googleapis.com/v1beta/models/');
+      const url = `${base}${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(apiKey)}`;
+      const payload = { contents: [{ role: 'user', parts: [{ text: prompt }] }] };
+      const resp = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+        signal: abortSignal,
+      });
+      if (!resp.ok) {
+        if (resp.status === 429) return 'rate-limited';
+        debugLog(`Gemini error ${resp.status}: ${resp.statusText}`);
+        return null;
+      }
+      const data = await resp.json();
+      const text = data?.candidates?.[0]?.content?.parts?.[0]?.text;
+      return text ? String(text).trim() : null;
+    } catch (e) {
+      console.error('Gemini API error:', e);
+      return null;
+    }
+  }
+
+  // DeepSeek
+  async function callDeepSeekAPI({ prompt, abortSignal }) {
+    try {
+      const apiKey = getPref('extensions.downloads.deepseek_api_key', '');
+      if (!apiKey) return null;
+      const model = getPref('extensions.downloads.deepseek_model', 'deepseek-chat');
+      const url = getPref('extensions.downloads.deepseek_api_url', 'https://api.deepseek.com/chat/completions');
+      const payload = { model, messages: [{ role: 'user', content: prompt }], max_tokens: 100, temperature: 0.2 };
+      const resp = await fetch(url, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${apiKey}`,
+        },
+        body: JSON.stringify(payload),
+        signal: abortSignal,
+      });
+      if (!resp.ok) {
+        if (resp.status === 429) return 'rate-limited';
+        debugLog(`DeepSeek error ${resp.status}: ${resp.statusText}`);
+        return null;
+      }
+      const data = await resp.json();
+      return data.choices?.[0]?.message?.content?.trim() || null;
+    } catch (e) {
+      console.error('DeepSeek API error:', e);
+      return null;
+    }
+  }
+
+  // Ollama (local)
+  async function callOllamaAPI({ prompt, localPath, fileExtension, abortSignal }) {
+    try {
+      const model = getPref('extensions.downloads.ollama_model', 'llama3.1:latest');
+      const url = getPref('extensions.downloads.ollama_endpoint', 'http://localhost:11434/api/generate');
+
+      const payload = { model, prompt, stream: false };
+      if (localPath) {
+        const base64 = fileToBase64(localPath);
+        if (base64) {
+          payload.images = [base64];
+          try {
+            const lower = String(model || '').toLowerCase();
+            const looksVision = /llava|vision|llama-vision|gpt-4o|vl|clip/.test(lower);
+            if (!looksVision) {
+              debugLog('[AI] Ollama image attached but model may not be vision-capable', { model }, 'aiRename');
+            }
+          } catch (_) {}
+        } else {
+          debugLog('[AI] Ollama image path provided but failed to encode; proceeding without image', { localPath }, 'aiRename');
+        }
+      }
+
+      if (abortSignal?.aborted) {
+        throw new DOMException('API request was aborted', 'AbortError');
+      }
+
+      const resp = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+        signal: abortSignal,
+      });
+      if (!resp.ok) {
+        if (resp.status === 429) return 'rate-limited';
+        debugLog(`Ollama error ${resp.status}: ${resp.statusText}`);
+        return null;
+      }
+      const data = await resp.json();
+      return data?.response ? String(data.response).trim() : null;
+    } catch (e) {
+      console.error('Ollama API error:', e);
+      return null;
+    }
+  }
+
 
 
   // --- Function to Open Downloaded File ---
@@ -3194,52 +3502,64 @@ Respond with ONLY the filename.`;
     }
   }
 
-  // Verify Mistral API connection
+  // Verify active AI provider connection (generic). Kept name for compatibility.
   async function verifyMistralConnection() {
     try {
-      let apiKey = "";
-      try {
-        const prefService = Cc["@mozilla.org/preferences-service;1"]
-          .getService(Ci.nsIPrefService);
-        const branch = prefService.getBranch("extensions.downloads.");
-        apiKey = branch.getStringPref("mistral_api_key", "");
-      } catch (e) {
-        console.error("Failed to get API key from preferences", e);
+      if (!getPref("extensions.downloads.enable_ai_renaming", true)) {
+        debugLog("AI renaming disabled via master toggle. Skipping verification.");
         aiRenamingPossible = false;
         return;
       }
 
-      if (!apiKey) {
-        debugLog("No Mistral API key found in preferences. AI renaming disabled.");
+      const provider = getActiveAIProvider();
+      if (!provider) {
+        debugLog("No AI provider enabled. Skipping verification.");
         aiRenamingPossible = false;
         return;
       }
 
-      const testResponse = await fetch(getPref("extensions.downloads.mistral_api_url", "https://api.mistral.ai/v1/chat/completions"), {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${apiKey}`,
-        },
-        body: JSON.stringify({
-          model: getPref("extensions.downloads.mistral_model", "pixtral-large-latest"),
-          messages: [
-            { role: "system", content: "You are a helpful assistant." },
-            { role: "user", content: "Hello, this is a test connection. Respond with 'ok'." },
-          ],
-          max_tokens: 5,
-        }),
-      });
-
-      if (testResponse.ok) {
-        debugLog("Mistral API connection successful!");
+      // For local Ollama, skip network verification to avoid triggering model pulls
+      if (provider === 'ollama') {
+        debugLog("[AI] Skipping verification for local Ollama; enabling AI renaming optimistically.", { provider }, 'aiRename');
         aiRenamingPossible = true;
+        return;
+      }
+
+      const testPrompt = "Respond with ok";
+      let result = null;
+      switch (provider) {
+        case 'mistral':
+          result = await callMistralAPI({ prompt: testPrompt, localPath: null, fileExtension: '', abortSignal: undefined });
+          break;
+        case 'openai':
+          result = await callOpenAIAPI({ prompt: testPrompt, abortSignal: undefined });
+          break;
+        case 'openrouter':
+          result = await callOpenRouterAPI({ prompt: testPrompt, localPath: null, fileExtension: '', abortSignal: undefined });
+          break;
+        case 'anthropic':
+          result = await callAnthropicAPI({ prompt: testPrompt, abortSignal: undefined });
+          break;
+        case 'gemini':
+          result = await callGeminiAPI({ prompt: testPrompt, abortSignal: undefined });
+          break;
+        case 'deepseek':
+          result = await callDeepSeekAPI({ prompt: testPrompt, abortSignal: undefined });
+          break;
+      }
+
+      if (typeof result === 'string' && result.toLowerCase().includes('ok')) {
+        debugLog(`AI provider (${provider}) connection successful!`);
+        aiRenamingPossible = true;
+      } else if (result === 'rate-limited') {
+        debugLog(`AI provider (${provider}) returned rate limit during verification`);
+        aiRenamingPossible = false;
       } else {
-        console.error("Mistral API connection failed:", await testResponse.text());
+        debugLog(`AI provider (${provider}) connection test did not succeed`);
         aiRenamingPossible = false;
       }
     } catch (e) {
-      console.error("Error verifying Mistral API connection:", e);
+      console.error("Error verifying AI provider connection:", e);
       aiRenamingPossible = false;
     }
   }
